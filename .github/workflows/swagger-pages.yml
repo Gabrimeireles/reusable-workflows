@@ -1,0 +1,130 @@
+﻿name: Reusable - Swagger Docs
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to checkout (branch, tag, or SHA)'
+        required: false
+        type: string
+        default: ''
+      node_version:
+        description: 'Node.js version'
+        required: false
+        type: string
+        default: '20'
+      swagger_command:
+        description: 'Command used to generate swagger.json'
+        required: false
+        type: string
+        default: 'npm run generate:swagger'
+      swagger_output_dir:
+        description: 'Output directory containing swagger.json'
+        required: false
+        type: string
+        default: 'swagger'
+      publish_pages:
+        description: 'Publish generated docs to GitHub Pages'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  generate:
+    name: Generate Swagger Artifact
+    runs-on: ubuntu-latest
+
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: ${{ inputs.ref != '' && inputs.ref || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Swagger JSON
+        env:
+          CI: 'true'
+          DB_URI: mongodb://127.0.0.1:27017/swagger
+          SWAGGER_OUTPUT_DIR: ${{ inputs.swagger_output_dir }}
+          JWT_SECRET: swagger-ci-secret
+          JWT_EXPIRES_IN: 1h
+        run: ${{ inputs.swagger_command }}
+
+      - name: Build Swagger UI index
+        run: |
+          mkdir -p "${{ inputs.swagger_output_dir }}"
+          cat > "${{ inputs.swagger_output_dir }}/index.html" <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>API Docs</title>
+            <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+          </head>
+          <body>
+            <div id="swagger-ui"></div>
+            <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+            <script>
+              window.ui = SwaggerUIBundle({
+                url: './swagger.json',
+                dom_id: '#swagger-ui',
+                deepLinking: true,
+                presets: [SwaggerUIBundle.presets.apis],
+              });
+            </script>
+          </body>
+          </html>
+          HTML
+
+      - name: Upload Swagger artifact
+        if: ${{ !inputs.publish_pages }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: swagger-docs
+          path: ${{ inputs.swagger_output_dir }}
+          if-no-files-found: error
+
+      - name: Configure Pages
+        if: ${{ inputs.publish_pages }}
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        if: ${{ inputs.publish_pages }}
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ inputs.swagger_output_dir }}
+
+  deploy-pages:
+    name: Deploy Swagger to Pages
+    if: ${{ inputs.publish_pages }}
+    needs: generate
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v4

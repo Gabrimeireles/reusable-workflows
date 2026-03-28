@@ -1,0 +1,130 @@
+﻿name: Reusable - Create GitHub Release
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref (branch/SHA) used for release source'
+        required: false
+        type: string
+        default: ''
+      release_version:
+        description: 'Release version without v prefix. Empty => package.json version'
+        required: false
+        type: string
+        default: ''
+      prerelease:
+        description: 'Mark release as prerelease'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      DISCORD_WEBHOOK_URL:
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Tag & Release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+      url: ${{ steps.create_release.outputs.url || steps.existing_release.outputs.url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref != '' && inputs.ref || github.ref }}
+
+      - name: Resolve release version
+        id: vars
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.release_version }}" ]; then
+            VERSION='${{ inputs.release_version }}'
+          else
+            VERSION=$(node -p "require('./package.json').version")
+          fi
+          TAG="v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag exists
+        id: exists
+        shell: bash
+        run: |
+          if git rev-parse "${{ steps.vars.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tag
+        if: steps.exists.outputs.exists != 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.vars.outputs.tag }}" -m "Release ${{ steps.vars.outputs.tag }}"
+          git push origin "${{ steps.vars.outputs.tag }}"
+
+      - name: Create GitHub Release
+        if: steps.exists.outputs.exists != 'true'
+        id: create_release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = '${{ steps.vars.outputs.tag }}';
+            const release = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Release ${tag}`,
+              draft: false,
+              prerelease: ${{ inputs.prerelease }},
+              generate_release_notes: true,
+            });
+            core.setOutput('url', release.data.html_url);
+
+      - name: Reuse existing release URL
+        if: steps.exists.outputs.exists == 'true'
+        id: existing_release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = '${{ steps.vars.outputs.tag }}';
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag,
+            });
+            core.setOutput('url', release.data.html_url);
+
+      - name: Summary
+        shell: bash
+        run: |
+          URL='${{ steps.create_release.outputs.url }}'
+          if [ -z "$URL" ]; then
+            URL='${{ steps.existing_release.outputs.url }}'
+          fi
+          {
+            echo "## Release"
+            echo "- Version: ${{ steps.vars.outputs.version }}"
+            echo "- Tag: ${{ steps.vars.outputs.tag }}"
+            echo "- URL: $URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify Discord
+        if: secrets.DISCORD_WEBHOOK_URL != ''
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          status: success
+          title: "Release ${{ steps.vars.outputs.tag }}"
+          description: "${{ steps.create_release.outputs.url || steps.existing_release.outputs.url }}"
+          color: 3066993
+          username: Release Bot

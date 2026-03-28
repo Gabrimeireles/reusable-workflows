@@ -1,0 +1,218 @@
+﻿name: Reusable - Deploy SSH + Docker Compose
+
+on:
+  workflow_call:
+    inputs:
+      deploy_environment:
+        description: 'Environment label for logs/notifications'
+        required: false
+        type: string
+        default: homologation
+      deploy_path:
+        description: 'Absolute path in the target server where docker compose lives'
+        required: true
+        type: string
+      service_name:
+        description: 'Service name in docker compose'
+        required: false
+        type: string
+        default: api
+      compose_env_file:
+        description: 'Compose env file used by docker compose'
+        required: false
+        type: string
+        default: .env
+      runtime_env_filename:
+        description: 'Runtime env file written on server from secret RUNTIME_ENV_FILE'
+        required: false
+        type: string
+        default: .env.backend
+      api_image:
+        description: 'Container image name for API service'
+        required: true
+        type: string
+      api_tag:
+        description: 'Container image tag for API service'
+        required: true
+        type: string
+      health_url:
+        description: 'Health check URL. Empty string disables health check.'
+        required: false
+        type: string
+        default: ''
+      health_retries:
+        description: 'Health check retries'
+        required: false
+        type: number
+        default: 10
+      health_interval:
+        description: 'Interval between health checks in seconds'
+        required: false
+        type: number
+        default: 30
+      skip_health_check:
+        description: 'Skip health check'
+        required: false
+        type: boolean
+        default: false
+      use_tailscale:
+        description: 'Enable Tailscale connection before SSH'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      DEPLOY_HOST:
+        required: true
+      DEPLOY_USER:
+        required: true
+      DEPLOY_SSH_KEY:
+        required: true
+      GHCR_TOKEN:
+        required: true
+      RUNTIME_ENV_FILE:
+        required: true
+      DISCORD_WEBHOOK_URL:
+        required: false
+      TS_OAUTH_CLIENT_ID:
+        required: false
+      TS_OAUTH_SECRET:
+        required: false
+
+permissions: {}
+
+jobs:
+  deploy:
+    name: Deploy to Server
+    runs-on: ubuntu-latest
+    outputs:
+      deployment-time: ${{ steps.deploy-info.outputs.time }}
+
+    steps:
+      - name: Connect to Tailscale
+        if: ${{ inputs.use_tailscale }}
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:dev-ci
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload runtime env file
+        env:
+          RUNTIME_ENV_FILE: ${{ secrets.RUNTIME_ENV_FILE }}
+        run: |
+          if [ -z "$RUNTIME_ENV_FILE" ]; then
+            echo "RUNTIME_ENV_FILE is empty"
+            exit 1
+          fi
+          umask 177
+          printf '%s\n' "$RUNTIME_ENV_FILE" > .runtime.env
+          scp .runtime.env "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ inputs.deploy_path }}/${{ inputs.runtime_env_filename }}"
+          rm -f .runtime.env
+
+      - name: Deploy to server
+        id: deploy-info
+        run: |
+          DEPLOY_START=$(date +%s)
+
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" <<'ENDSSH'
+            set -e
+            cd "${{ inputs.deploy_path }}"
+
+            echo "Logging into GHCR..."
+            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+
+            if [ ! -f "${{ inputs.compose_env_file }}" ]; then
+              touch "${{ inputs.compose_env_file }}"
+            fi
+
+            grep -vE '^(API_IMAGE|API_TAG)=' "${{ inputs.compose_env_file }}" > "${{ inputs.compose_env_file }}.tmp" || true
+            cat >> "${{ inputs.compose_env_file }}.tmp" <<COMPOSE
+            API_IMAGE=${{ inputs.api_image }}
+            API_TAG=${{ inputs.api_tag }}
+            COMPOSE
+            mv "${{ inputs.compose_env_file }}.tmp" "${{ inputs.compose_env_file }}"
+
+            chmod 600 "${{ inputs.runtime_env_filename }}" || true
+
+            echo "Pulling and recreating service ${{ inputs.service_name }}..."
+            docker compose --env-file "${{ inputs.compose_env_file }}" pull "${{ inputs.service_name }}"
+            docker compose --env-file "${{ inputs.compose_env_file }}" up -d --no-deps --force-recreate "${{ inputs.service_name }}"
+            docker image prune -f
+          ENDSSH
+
+          DEPLOY_END=$(date +%s)
+          DEPLOY_DURATION=$((DEPLOY_END - DEPLOY_START))
+          echo "time=$DEPLOY_DURATION" >> "$GITHUB_OUTPUT"
+
+  health-check:
+    name: Health Check
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: ${{ !inputs.skip_health_check && inputs.health_url != '' }}
+
+    steps:
+      - name: Check API health endpoint
+        run: |
+          MAX_RETRIES=${{ inputs.health_retries }}
+          RETRY_COUNT=0
+          HEALTH_URL='${{ inputs.health_url }}'
+
+          while [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; do
+            STATUS_CODE=$(curl -sS -L --connect-timeout 5 --max-time 15 -o /tmp/health.body -w "%{http_code}" "$HEALTH_URL" || true)
+
+            if echo "$STATUS_CODE" | grep -q "^[2][0-9][0-9]$"; then
+              echo "Health check passed"
+              exit 0
+            fi
+
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; then
+              sleep ${{ inputs.health_interval }}
+            fi
+          done
+
+          echo "Health check failed"
+          cat /tmp/health.body || true
+          exit 1
+
+  notify:
+    name: Notify Discord
+    runs-on: ubuntu-latest
+    needs: [deploy, health-check]
+    if: ${{ always() && secrets.DISCORD_WEBHOOK_URL != '' }}
+
+    steps:
+      - name: Build status
+        id: status
+        run: |
+          if [[ "${{ needs.deploy.result }}" == "success" && ("${{ needs.health-check.result }}" == "success" || "${{ needs.health-check.result }}" == "skipped") ]]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "color=3066993" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            echo "color=15158332" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send Discord message
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          status: ${{ steps.status.outputs.status }}
+          title: "Deploy - ${{ inputs.deploy_environment }}"
+          description: |
+            **Service:** ${{ inputs.service_name }}
+            **Image:** `${{ inputs.api_image }}:${{ inputs.api_tag }}`
+            **Deploy Time:** ${{ needs.deploy.outputs.deployment-time }}s
+            **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          color: ${{ steps.status.outputs.color }}
+          username: Deploy Bot
