@@ -17,6 +17,11 @@ on:
         required: false
         type: string
         default: api
+      compose_file:
+        description: 'Docker Compose file from the caller repository to upload to the server'
+        required: false
+        type: string
+        default: docker-compose.yml
       compose_env_file:
         description: 'Compose env file used by docker compose'
         required: false
@@ -90,6 +95,11 @@ jobs:
       deployment-time: ${{ steps.deploy-info.outputs.time }}
 
     steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Connect to Tailscale
         if: ${{ inputs.use_tailscale }}
         uses: tailscale/github-action@v4
@@ -116,6 +126,7 @@ jobs:
             echo "Missing required secret: GHCR_TOKEN or GHCR_PAT"
             exit 1
           fi
+          [ -f "${{ inputs.compose_file }}" ] || { echo "Missing compose file: ${{ inputs.compose_file }}"; exit 1; }
 
       - name: Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
@@ -126,6 +137,14 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Ensure deploy path exists on server
+        run: |
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" "mkdir -p '${{ inputs.deploy_path }}'"
+
+      - name: Upload docker compose file
+        run: |
+          scp "${{ inputs.compose_file }}" "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ inputs.deploy_path }}/docker-compose.yml"
 
       - name: Upload runtime env file
         env:
