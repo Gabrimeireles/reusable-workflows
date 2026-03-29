@@ -248,10 +248,12 @@ jobs:
           fi
 
       - name: Send Discord message
-        if: secrets.DISCORD_WEBHOOK_URL != ''
+        if: env.DISCORD_WEBHOOK_URL != ''
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         uses: sarisia/actions-status-discord@v1
         with:
-          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          webhook: ${{ env.DISCORD_WEBHOOK_URL }}
           status: ${{ steps.status.outputs.status }}
           title: "Deploy - ${{ inputs.deploy_environment }}"
           description: |
