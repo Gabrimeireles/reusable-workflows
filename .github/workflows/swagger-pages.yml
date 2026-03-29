@@ -28,6 +28,11 @@ on:
         required: false
         type: boolean
         default: true
+      pages_environment:
+        description: 'Environment used by deploy-pages job'
+        required: false
+        type: string
+        default: github-pages
 
 permissions:
   contents: read
@@ -121,7 +126,7 @@ jobs:
     needs: generate
     runs-on: ubuntu-latest
     environment:
-      name: github-pages
+      name: ${{ inputs.pages_environment }}
       url: ${{ steps.deploy.outputs.page_url }}
 
     steps:

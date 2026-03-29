@@ -214,7 +214,7 @@ jobs:
     name: Notify Discord
     runs-on: ubuntu-latest
     needs: [deploy, health-check]
-    if: ${{ always() }}
+    if: always()
 
     steps:
       - name: Build status
@@ -229,7 +229,7 @@ jobs:
           fi
 
       - name: Send Discord message
-        if: ${{ secrets.DISCORD_WEBHOOK_URL != '' }}
+        if: secrets.DISCORD_WEBHOOK_URL != ''
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
