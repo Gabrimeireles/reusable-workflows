@@ -179,11 +179,11 @@ jobs:
               touch "${{ inputs.compose_env_file }}"
             fi
 
-            grep -vE '^(API_IMAGE|API_TAG)=' "${{ inputs.compose_env_file }}" > "${{ inputs.compose_env_file }}.tmp" || true
-            cat >> "${{ inputs.compose_env_file }}.tmp" <<COMPOSE
-            API_IMAGE=${{ inputs.api_image }}
-            API_TAG=${{ inputs.api_tag }}
-            COMPOSE
+            {
+              grep -vE '^(API_IMAGE|API_TAG)=' "${{ inputs.compose_env_file }}" || true
+              printf 'API_IMAGE=%s\n' '${{ inputs.api_image }}'
+              printf 'API_TAG=%s\n' '${{ inputs.api_tag }}'
+            } > "${{ inputs.compose_env_file }}.tmp"
             mv "${{ inputs.compose_env_file }}.tmp" "${{ inputs.compose_env_file }}"
 
             chmod 600 "${{ inputs.runtime_env_filename }}" || true
