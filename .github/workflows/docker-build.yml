@@ -81,8 +81,8 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=sha,prefix={{branch}}-
-            type=raw,value=v${{ steps.version.outputs.version }}
+            type=sha,prefix=sha-
+            type=raw,value=v${{ steps.version.outputs.version }},enable=${{ github.ref == 'refs/heads/master' }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
           labels: |
             org.opencontainers.image.title=${{ inputs.image_name }}
