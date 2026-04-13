@@ -85,7 +85,8 @@ on:
       TS_OAUTH_SECRET:
         required: false
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   deploy:
