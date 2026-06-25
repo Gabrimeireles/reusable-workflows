@@ -130,7 +130,7 @@ jobs:
           [ -f "${{ inputs.compose_file }}" ] || { echo "Missing compose file: ${{ inputs.compose_file }}"; exit 1; }
 
       - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.9.0
+        uses: webfactory/ssh-agent@v0.10.0
         with:
           ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
 
