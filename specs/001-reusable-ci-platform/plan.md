@@ -7,16 +7,20 @@ clarifications from `specs/001-reusable-ci-platform/clarify-log.md`.
 
 ## Summary
 
-Replace the current four flat, partially-generic reusable workflows with a modular platform:
-a small set of orchestrating reusable workflows plus a library of composite actions that each
-own one concern (network, SSH, config loading, upload, backup, DB command, health check,
-summary). Consumers (starting with Pricely) call `deploy-stack.yml` with a handful of scalar
+Add a modular platform alongside the current four reusable workflows, additively: a small set
+of new orchestrating reusable workflows plus a library of composite actions that each own one
+concern (network, SSH, config loading, upload, backup, DB command, health check, summary).
+Consumers (starting with Pricely) call the new `deploy-stack.yml` with a handful of scalar
 inputs plus an optional declarative YAML config file for the list/nested data (images, health
-checks, database, env files). Every infrastructure secret is declared, by name, on the
-workflow's `on.workflow_call.secrets` contract and validated at runtime, while callers use
-`secrets: inherit` for now (personal-account, single-trusted-caller reality — see
-`docs/adr/0002-secrets-strategy.md`). Destructive DB operations are structurally blocked outside
+checks, database, env files). Every secret is declared, by name, on the workflow's
+`on.workflow_call.secrets` contract and validated at runtime; callers use an explicit `secrets:`
+map, renaming their own secrets onto fixed positional slots for environment files (personal-
+account reality plus a hard GitHub Actions constraint — see `docs/adr/0002-secrets-strategy.md`
+and `analysis-report.md` Finding 1). Destructive DB operations are structurally blocked outside
 `workflow_dispatch`. Rollback is manual-only, supported by preserved previous-state artifacts.
+Analysis of the account's other repositories found three more active consumers beyond Pricely
+(`analysis-report.md` Finding 2); `docker-deploy-ssh.yml`, `github-release.yml`, and
+`swagger-pages.yml` are therefore kept behaviorally unchanged rather than replaced.
 
 ## Technical Context
 
@@ -110,12 +114,14 @@ specs/001-reusable-ci-platform/
 ```text
 .github/
 ├── workflows/
-│   ├── ci.yml                 # Lints + tests this repo itself (actionlint/shellcheck/yamllint/bats)
-│   ├── docker-build.yml       # Reusable: build + push N images (monorepo-aware)
-│   ├── deploy-stack.yml       # Reusable: orchestrates the full deploy (calls composite actions below)
-│   ├── release.yml            # Reusable: tag + GitHub Release (generalized from github-release.yml)
-│   ├── validate-caller.yml    # Reusable: standalone config/input validation (usable on PRs, and internally by deploy-stack.yml)
-│   └── swagger-pages.yml      # Kept, lightly hardened (permissions/pinning only — out of this feature's core scope)
+│   ├── ci.yml                 # NEW. Lints + tests this repo itself (actionlint/shellcheck/yamllint/bats)
+│   ├── docker-build.yml       # CHANGED, backward-compatible (adds optional version_file, default preserves current behavior)
+│   ├── deploy-stack.yml       # NEW. Orchestrates the full deploy (calls composite actions below)
+│   ├── release.yml            # NEW, additive. Generalized tag+release; coexists with github-release.yml
+│   ├── validate-caller.yml    # NEW. Standalone config/input validation (usable on PRs, and internally by deploy-stack.yml)
+│   ├── docker-deploy-ssh.yml  # UNCHANGED behavior (active consumers: CoGuide_PPS_BackEnd/FrontEnd, Conecta_SLA — see analysis-report.md Finding 2)
+│   ├── github-release.yml     # UNCHANGED behavior (same active consumers)
+│   └── swagger-pages.yml      # UNCHANGED behavior (same active consumers); only additive hardening (permissions/pinning) allowed
 ├── actions/
 │   ├── resolve-project/           # Validates project/environment names, computes & validates deploy_path
 │   ├── load-config/                # Parses + validates the declarative YAML config against contracts/config.schema.json
@@ -166,6 +172,16 @@ so it is independently unit-testable with Bats and independently reusable if a f
 needs only part of the sequence (e.g. `validate-caller.yml` reuses `resolve-project` and
 `load-config` without pulling in deploy logic). This directly implements
 `docs/adr/0001-reusable-workflows-vs-composite-actions.md`.
+
+New workflows are **additive**, not replacements: `gh search code` against every repository on
+the `Gabrimeireles` account (`analysis-report.md` Finding 2) found `docker-deploy-ssh.yml`,
+`github-release.yml`, and `swagger-pages.yml` pinned and actively used by
+`CoGuide_PPS_BackEnd`, `CoGuide_PPS_FrontEnd`, and `Conecta_SLA` at tags `v1.5`/`v1.7`/`v1.8`.
+Per Constitution Principle IV, these three files keep their exact current contract and
+behavior — the platform adds `deploy-stack.yml`/`release.yml`/`validate-caller.yml` alongside
+them rather than renaming or removing anything those repositories depend on. Migrating those
+three repositories to the new platform is explicitly out of this feature's scope (only Pricely
+was named as the migration target) and is called out as follow-up work.
 
 ## Phase 0 — Research
 

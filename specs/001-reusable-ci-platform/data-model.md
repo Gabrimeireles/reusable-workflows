@@ -29,13 +29,18 @@ declarative config file (`contracts/config.schema.json` is the enforced version 
 | `dependencyServices` | string[] | no | Services started before migration (e.g. `postgres`, `redis`, `pgadmin`). |
 | `applicationServices` | string[] | no | Services recreated after migration (e.g. `backend`, `web`). Defaults to all image `id`s. |
 
-## Environment files (list, 0..N)
+## Environment files (list, 0..6)
+
+Positional, not looked-up-by-name: the *i*-th entry (1-indexed) in this list is populated from
+the reusable workflow's `ENV_FILE_<i>` secret slot. See `docs/adr/0002-secrets-strategy.md` and
+`analysis-report.md` Finding 1 for why this is positional rather than dynamic-by-name (GitHub
+Actions expressions cannot look up a secret by a computed name).
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `secret` | string | yes | Name of the caller secret holding the file's full contents. |
+| `secret` | string | yes | **Documentation only** — the human-readable name the caller actually gave this secret in their own repository (e.g. `BACKEND_ENV_FILE`), for readability. The platform does not look this up dynamically; the caller wires it to `ENV_FILE_<position>` explicitly in their own workflow's `secrets:` map. |
 | `destination` | string, filename only | yes | e.g. `.env.backend`. |
-| `required` | boolean | no, default `true` | If `true` and the secret is empty, the run fails before upload. |
+| `required` | boolean | no, default `true` | If `true` and `ENV_FILE_<position>` is empty, the run fails before upload. |
 
 ## Database configuration (optional block)
 

@@ -58,10 +58,14 @@ test), independent of any real workflow run.
       without invoking Buildx)
 - [ ] T021 [US1] `.github/scripts/lib/image-tags.sh` — owner lowercasing, SHA tag, floating-tag
       gate by branch (extracted from current `docker-build.yml` logic)
-- [ ] T022 [US1] Rewrite `.github/workflows/docker-build.yml`: add `version_file` input
-      (default `""`, optional), stop requiring `./package.json`, keep
-      `image_name`/`dockerfile`/`context`, add `build_args` (JSON object → `docker/build-push-action`
-      `build-args`), keep PR no-push behavior, add explicit `permissions:`
+- [ ] T022 [US1] Edit (not rewrite) `.github/workflows/docker-build.yml`: add `version_file`
+      input defaulting to `./package.json` (byte-identical current behavior for existing
+      `CoGuide_PPS_BackEnd`/`Conecta_SLA` callers pinned to `v1.5`), skip version-tag extraction
+      when the resolved path doesn't exist instead of failing, allow `""` to disable it
+      explicitly; keep `image_name`/`dockerfile`/`context` unchanged; add `build_args` (JSON
+      object → `docker/build-push-action` `build-args`); keep PR no-push behavior; add explicit
+      `permissions:` if missing. Ship as a `v1` minor release (non-breaking) — see
+      `analysis-report.md` Finding 2.
 - [ ] T023 [US1] Wire `docker-build.yml`'s lint/shellcheck into `ci.yml`
 
 **Checkpoint**: `docker-build.yml` builds a fixture project with 2 images, neither with a root
@@ -79,7 +83,10 @@ exercised in this repo's own CI per Principle X.)
 (`docs/migration-pricely.md` equivalence check).
 
 - [ ] T030 [P] [US2] `.github/actions/prepare-deploy-files/action.yml` — render compose
-      destination + env files into a `mktemp -d` 0700 dir, `umask 177` before each write
+      destination + up to 6 positional env files (inputs `env_file_1_contents` ..
+      `env_file_6_contents`, matched to `load-config`'s parsed `environmentFiles[].destination`/
+      `.required` by index — see ADR 0002/`analysis-report.md` Finding 1) into a `mktemp -d`
+      0700 dir, `umask 177` before each write
 - [ ] T031 [P] [US2] `.github/actions/upload-deploy-files/action.yml` — `scp` the temp dir
       contents to `deploy_path`, then `rm -rf` the local temp dir unconditionally (`if: always()`)
 - [ ] T032 [US2] `.github/actions/deploy-compose/action.yml` (remote steps over `ssh`, command
@@ -97,7 +104,10 @@ exercised in this repo's own CI per Principle X.)
 - [ ] T036 [US2] `.github/workflows/deploy-stack.yml` — orchestrates T010/T012/T016/T017/T030-
       T035/T018 in one `deploy` job plus a `reset-guard` step (Principle VII / FR-030) that hard-
       fails if `reset_database == true` and `github.event_name != 'workflow_dispatch'`; sets
-      `concurrency: group: deploy-${{ inputs.project_name }}-${{ inputs.environment_name }}`
+      `concurrency: group: deploy-${{ inputs.project_name }}-${{ inputs.environment_name }}`;
+      declares `on.workflow_call.secrets`: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`,
+      `GHCR_PAT`, `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`, `POSTGRES_PASSWORD`, `ENV_FILE_1`..
+      `ENV_FILE_6` (all `required: false`, runtime-validated conditionally — ADR 0002)
 - [ ] T037 [US2] `tests/bats/reset-guard.bats` — asserts the guard script fails on
       `push`+`reset=true` and passes on `workflow_dispatch`+`reset=true`
 - [ ] T038 [US2] `tests/bats/backup-postgres.bats` — against a throwaway local Postgres
@@ -146,12 +156,18 @@ command.
 
 ## Phase 7: Polish & Cross-Cutting
 
-- [ ] T070 [P] `.github/workflows/release.yml` — generalize `github-release.yml`'s
-      `./package.json` read into an optional `version_file` input (same fix as T022)
+- [ ] T070 [P] `.github/workflows/release.yml` — NEW, additive workflow (copy of
+      `github-release.yml`'s logic with the `version_file` input from T022); `github-release.yml`
+      itself is left unchanged for its existing consumers (`analysis-report.md` Finding 2)
 - [ ] T071 [P] Pin every third-party (non-`actions/*`/`docker/*`) `uses:` across all workflows
       and actions to a full commit SHA with a version comment (Principle XIII)
 - [ ] T072 [P] Add explicit `permissions:` to every workflow that's missing one
-      (`swagger-pages.yml` audit) (Principle XIV)
+      (`swagger-pages.yml` audit) (Principle XIV) — additive only, no behavior change, given
+      `CoGuide_PPS_BackEnd`/`CoGuide_PPS_FrontEnd`/`Conecta_SLA` pin these files
+- [ ] T072a [P] Manually verify (no code change expected) that `CoGuide_PPS_BackEnd`,
+      `CoGuide_PPS_FrontEnd`, and `Conecta_SLA` still resolve correctly at their pinned
+      `v1.5`/`v1.7`/`v1.8` tags after T022/T071/T072 (those tags are immutable refs to old
+      commits and are never rewritten, so this is a sanity check, not a migration)
 - [ ] T073 `README.md` full rewrite (purpose, architecture, workflows, actions, quickstart,
       security model, versioning, troubleshooting)
 - [ ] T074 [P] `docs/architecture.md`

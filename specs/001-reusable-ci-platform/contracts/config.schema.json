@@ -49,6 +49,7 @@
     },
     "environmentFiles": {
       "type": "array",
+      "maxItems": 6,
       "items": {
         "type": "object",
         "additionalProperties": false,

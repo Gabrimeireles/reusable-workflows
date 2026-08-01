@@ -53,23 +53,45 @@ recorded in `docs/secrets-and-environments.md`.
   declares every secret it can use, by name, in `on.workflow_call.secrets` with
   `required: true/false`, and runtime-validates each one before first use.
 
-**Decision: C — Hybrid**, for the current personal-account, single-trusted-maintainer
-situation; **A is the recommended switch once any repository moves to an organization** or gains
-collaborators who shouldn't see every secret.
+**Original decision (superseded during `/speckit.analyze` — see
+`analysis-report.md` Finding 1)**: C — Hybrid, reasoning that `inherit`'s simplicity was safe
+for a solo-maintained personal account.
+
+**Why it was superseded**: The hybrid model's declarative config (`docs/adr/0003`) lets each
+project name its own environment-file secret however it likes (`BACKEND_ENV_FILE`,
+`WEB_ENV_FILE`, ...). Verifying GitHub's actual behavior (not assuming) surfaced two hard
+constraints: (1) `secrets: inherit` and an explicit `secrets:` map are **mutually exclusive** on
+one `uses:` call — a caller must pick one for the whole call; (2) even under `inherit`, a called
+workflow can only reference a secret via a **static, literal** `${{ secrets.NAME }}` token —
+there is no dynamic/computed lookup (`secrets[configValue]` is not supported). A reusable
+workflow therefore can never "read whichever secret name a project's YAML happens to mention,"
+which the original Option C silently assumed was possible.
+
+**Decision: A — Explicit `secrets:` map at every call site**, combined with a fixed, generic set
+of positional secret slots (`ENV_FILE_1` .. `ENV_FILE_6`) for environment files, so the platform
+never needs dynamic secret lookup. The declarative config's `environmentFiles` list (capped at 6
+entries) is positional: its *i*-th entry's `destination`/`required` fields describe what
+`ENV_FILE_<i>`'s contents get written to; its `secret` field becomes a documentation-only label
+(the human-readable name the caller actually gave that secret in their own repository), not
+something the platform looks up dynamically.
 
 **Rationale**: The load-bearing fact from the GitHub Actions documentation (confirmed live, not
 assumed — see `docs/secrets-and-environments.md`) is that secrets configured **in
-`reusable-workflows` itself are never available to a caller** — `secrets: inherit` only
-forwards secrets the *caller's own job* already has (its repo secrets, and org/environment
-secrets if it has any). So `inherit` cannot over-expose beyond what the calling repository
-(e.g. Pricely) already grants its own workflow runs; it just saves re-typing ~10 secret names
-per caller. Because every current and near-term caller is a solo-maintained personal repository
-with no other collaborators, the risk `inherit` is meant to guard against (a less-trusted
-caller silently getting secrets it shouldn't) does not yet exist. Declaring every secret by name
-in the reusable workflow's own contract (Option A's benefit) is kept anyway, as documentation
-and as a fail-fast runtime check — this is not a GitHub-enforced restriction, but it means a
-misconfigured caller gets "Missing required secret: DEPLOY_SSH_KEY" instead of an opaque SSH
-failure three steps later.
+`reusable-workflows` itself are never available to a caller** regardless of which mechanism is
+used — a caller's job only ever forwards secrets it already has. So explicit mapping costs only
+a handful of extra, self-documenting lines per caller (Pricely needs ~9), not a security
+compromise. It also removes the mutual-exclusivity trap entirely, keeps each project's
+human-readable secret names in its own Settings page, and is — as originally noted in ADR
+0002 — the pattern already recommended for the eventual organization scenario, so choosing it
+now means zero migration of the secrets contract later. Every secret `deploy-stack.yml` can use
+is still declared by name in `on.workflow_call.secrets` (satisfying FR-042) and
+runtime-validated as conditionally required based on which features the config enables, so a
+misconfigured caller still gets "Missing required secret: DEPLOY_SSH_KEY" instead of an opaque
+downstream failure.
+
+**Consequence**: `docs/adr/0002-secrets-strategy.md` and `contracts/workflow-contracts.md`
+carry the corrected mechanism; `contracts/config.schema.json` caps `environmentFiles` at 6
+items.
 
 **Consequence**: `docs/secrets-and-environments.md` documents both the personal-account
 strategy (this decision) and the organization-scenario recommendation (switch to explicit

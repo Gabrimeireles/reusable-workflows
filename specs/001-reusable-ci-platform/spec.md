@@ -326,7 +326,8 @@ even if the value somehow arrives as `true`.
 - Project configuration is expressed through a combination of `workflow_call` inputs and an
   optional declarative YAML file in the caller repository, rather than one pure approach.
   [NEEDS CLARIFICATION: confirmed — see Clarifications]
-- Callers use `secrets: inherit` when calling the platform's deploy workflow, and the platform
-  declares every secret it can possibly use in `on.workflow_call.secrets` so the contract stays
-  self-documenting even though `inherit` is used at the call site. [NEEDS CLARIFICATION:
+- Callers pass secrets to the platform's deploy workflow via an explicit `secrets:` map (not
+  `secrets: inherit`, which cannot coexist with the positional environment-file secret slots —
+  see Clarifications Q2), and the platform declares every secret it can possibly use, by name,
+  in `on.workflow_call.secrets` so the contract stays self-documenting. [NEEDS CLARIFICATION:
   confirmed — see Clarifications]
