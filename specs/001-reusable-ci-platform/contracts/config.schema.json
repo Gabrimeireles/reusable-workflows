@@ -1,0 +1,136 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Gabrimeireles/reusable-workflows/deploy-config.schema.json",
+  "title": "Reusable Workflows deploy configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "project", "images", "compose"],
+  "properties": {
+    "version": { "const": 1 },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,48}$" },
+        "deployPath": { "type": "string", "pattern": "^/srv/stacks/[a-z0-9][a-z0-9/_.-]*$" }
+      }
+    },
+    "images": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "context", "dockerfile"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },
+          "context": { "type": "string", "minLength": 1, "not": { "pattern": "(^|/)\\.\\.(/|$)" } },
+          "dockerfile": { "type": "string", "minLength": 1, "not": { "pattern": "(^|/)\\.\\.(/|$)" } },
+          "buildArgs": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "propertyNames": { "pattern": "^(?!.*(SECRET|TOKEN|PASSWORD|KEY)).*$" }
+          }
+        }
+      }
+    },
+    "compose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1, "not": { "pattern": "(^|/)\\.\\.(/|$)" } },
+        "destination": { "type": "string", "pattern": "^[a-zA-Z0-9._-]+$" },
+        "dependencyServices": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" } },
+        "applicationServices": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" } }
+      }
+    },
+    "environmentFiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["secret", "destination"],
+        "properties": {
+          "secret": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+          "destination": { "type": "string", "pattern": "^\\.[a-zA-Z0-9._-]*[a-zA-Z0-9]$" },
+          "required": { "type": "boolean", "default": true }
+        }
+      }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "engine": { "const": "postgres" },
+        "composeService": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+        "containerDatabase": { "type": "string", "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,62}$" },
+        "containerUser": { "type": "string", "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,62}$" },
+        "backup": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "retentionDays": { "type": "integer", "minimum": 1, "default": 14 }
+          }
+        },
+        "migration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["service", "command"],
+          "properties": {
+            "service": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+            "command": { "type": "string", "minLength": 1 }
+          }
+        },
+        "reset": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "command": { "type": "string", "minLength": 1 }
+          }
+        },
+        "seed": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "command": { "type": "string", "minLength": 1 }
+          }
+        }
+      },
+      "if": { "properties": { "enabled": { "const": true } } },
+      "then": { "required": ["engine", "composeService", "containerDatabase", "migration"] }
+    },
+    "healthChecks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "type": { "enum": ["http", "compose"] },
+          "url": { "type": "string", "format": "uri" },
+          "service": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+          "command": { "type": "string", "minLength": 1 },
+          "retries": { "type": "integer", "minimum": 1, "default": 10 },
+          "intervalSeconds": { "type": "integer", "minimum": 1, "default": 10 }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "type": { "const": "http" } } },
+            "then": { "required": ["url"] }
+          },
+          {
+            "if": { "properties": { "type": { "const": "compose" } } },
+            "then": { "required": ["service", "command"] }
+          }
+        ]
+      }
+    }
+  }
+}
