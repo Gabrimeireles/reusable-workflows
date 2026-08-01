@@ -37,7 +37,7 @@ runs:
         fi
     # tailscale/github-action pinned by commit SHA (Principle XIII); resolved during T071.
     - if: ${{ inputs.enabled == 'true' }}
-      uses: tailscale/github-action@v4
+      uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
       with:
         oauth-client-id: ${{ inputs.oauth_client_id }}
         oauth-secret: ${{ inputs.oauth_secret }}
