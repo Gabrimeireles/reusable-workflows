@@ -1,0 +1,13 @@
+version: 1
+
+project:
+  name: evilapp
+
+images:
+  - id: app
+    name: evilapp
+    context: ../../etc
+    dockerfile: ../../etc/passwd
+
+compose:
+  source: ../../../etc/shadow

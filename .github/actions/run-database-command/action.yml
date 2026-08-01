@@ -1,0 +1,55 @@
+name: "Run database command"
+description: >-
+  Runs a caller-supplied, opaque shell command (migration/reset/seed) inside a named Compose
+  service via `docker compose run --rm`. The platform never inspects or special-cases the
+  command's content (see docs/adr/0005-project-specific-commands.md) — it is the caller's own
+  tool of choice, whatever that may be.
+inputs:
+  enabled: { required: false, default: "true" }
+  label:
+    description: "Human label for logs/summary, e.g. migration, reset, seed"
+    required: true
+  deploy_user: { required: true }
+  deploy_host: { required: true }
+  deploy_path: { required: true }
+  compose_filename: { required: false, default: "docker-compose.yml" }
+  service: { required: true }
+  command: { required: true }
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      env:
+        ENABLED: ${{ inputs.enabled }}
+        LABEL: ${{ inputs.label }}
+        DEPLOY_USER: ${{ inputs.deploy_user }}
+        DEPLOY_HOST: ${{ inputs.deploy_host }}
+        DEPLOY_PATH: ${{ inputs.deploy_path }}
+        COMPOSE_FILENAME: ${{ inputs.compose_filename }}
+        SERVICE: ${{ inputs.service }}
+        COMMAND: ${{ inputs.command }}
+      run: |
+        set -euo pipefail
+
+        if [ "$ENABLED" != "true" ]; then
+          echo "Skipping $LABEL (not requested)."
+          exit 0
+        fi
+        if [ -z "$COMMAND" ]; then
+          echo "::error::No command configured for '$LABEL' but it was requested"
+          exit 1
+        fi
+
+        echo "Running $LABEL in service '$SERVICE'..."
+
+        {
+          printf 'DEPLOY_PATH=%q\n' "$DEPLOY_PATH"
+          printf 'COMPOSE_FILENAME=%q\n' "$COMPOSE_FILENAME"
+          printf 'SERVICE=%q\n' "$SERVICE"
+          printf 'COMMAND=%q\n' "$COMMAND"
+          cat <<'REMOTE_SCRIPT'
+        set -euo pipefail
+        cd "$DEPLOY_PATH"
+        docker compose --env-file .env -f "$COMPOSE_FILENAME" run --rm -T "$SERVICE" sh -lc "$COMMAND" </dev/null
+        REMOTE_SCRIPT
+        } | ssh "$DEPLOY_USER@$DEPLOY_HOST" "bash -s"

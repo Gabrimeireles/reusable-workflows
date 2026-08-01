@@ -1,0 +1,103 @@
+name: "Deploy compose"
+description: >-
+  Runs one stage of the remote docker compose lifecycle: "snapshot" (before any new file is
+  uploaded — preserve the currently-running .env/compose for manual rollback), "start" (after
+  upload — GHCR login, pull, start dependency services), or "recreate" (after migration —
+  recreate application services, prune dangling images). Values are streamed to the remote
+  shell over SSH stdin as bash-escaped assignments, never as command-line arguments or direct
+  string interpolation.
+inputs:
+  stage:
+    description: "snapshot | start | recreate"
+    required: true
+  deploy_user: { required: true }
+  deploy_host: { required: true }
+  deploy_path: { required: true }
+  compose_filename: { required: false, default: "docker-compose.yml" }
+  ghcr_pat: { required: false, default: "" }
+  github_repository_owner: { required: false, default: "" }
+  dependency_services: { required: false, default: "" }
+  application_services: { required: false, default: "" }
+outputs:
+  previous_image_lines:
+    description: "IMAGE/TAG lines read from the server's previous .env before it was overwritten (snapshot stage only)"
+    value: ${{ steps.run.outputs.previous_image_lines }}
+runs:
+  using: "composite"
+  steps:
+    - id: run
+      shell: bash
+      env:
+        STAGE: ${{ inputs.stage }}
+        DEPLOY_USER: ${{ inputs.deploy_user }}
+        DEPLOY_HOST: ${{ inputs.deploy_host }}
+        DEPLOY_PATH: ${{ inputs.deploy_path }}
+        COMPOSE_FILENAME: ${{ inputs.compose_filename }}
+        GHCR_PAT: ${{ inputs.ghcr_pat }}
+        GITHUB_REPOSITORY_OWNER: ${{ inputs.github_repository_owner }}
+        DEPENDENCY_SERVICES: ${{ inputs.dependency_services }}
+        APPLICATION_SERVICES: ${{ inputs.application_services }}
+      run: |
+        set -euo pipefail
+
+        if [ "$STAGE" = "start" ] && [ -z "$GHCR_PAT" ]; then
+          echo "::error::Missing required secret for GHCR authentication (GHCR_PAT)"
+          exit 1
+        fi
+
+        {
+          printf 'STAGE=%q\n' "$STAGE"
+          printf 'DEPLOY_PATH=%q\n' "$DEPLOY_PATH"
+          printf 'COMPOSE_FILENAME=%q\n' "$COMPOSE_FILENAME"
+          printf 'GHCR_PAT=%q\n' "$GHCR_PAT"
+          printf 'GITHUB_REPOSITORY_OWNER=%q\n' "$GITHUB_REPOSITORY_OWNER"
+          printf 'DEPENDENCY_SERVICES=%q\n' "$DEPENDENCY_SERVICES"
+          printf 'APPLICATION_SERVICES=%q\n' "$APPLICATION_SERVICES"
+          cat <<'REMOTE_SCRIPT'
+        set -euo pipefail
+        mkdir -p "$DEPLOY_PATH"
+        cd "$DEPLOY_PATH"
+
+        case "$STAGE" in
+          snapshot)
+            echo "previous_image_lines_begin"
+            if [ -f .env ]; then
+              grep -E '_IMAGE=|^IMAGE_TAG=' .env || true
+              cp .env .env.previous
+            fi
+            echo "previous_image_lines_end"
+            [ -f "$COMPOSE_FILENAME" ] && cp "$COMPOSE_FILENAME" "docker-compose.previous.yml"
+            ;;
+          start)
+            echo "$GHCR_PAT" | docker login ghcr.io -u "$GITHUB_REPOSITORY_OWNER" --password-stdin
+            docker compose --env-file .env -f "$COMPOSE_FILENAME" pull
+            if [ -n "$DEPENDENCY_SERVICES" ]; then
+              # shellcheck disable=SC2086
+              docker compose --env-file .env -f "$COMPOSE_FILENAME" up -d $DEPENDENCY_SERVICES
+            fi
+            ;;
+          recreate)
+            if [ -n "$APPLICATION_SERVICES" ]; then
+              # shellcheck disable=SC2086
+              docker compose --env-file .env -f "$COMPOSE_FILENAME" up -d --force-recreate $APPLICATION_SERVICES
+            fi
+            docker image prune -f
+            ;;
+          *)
+            echo "Unknown stage: $STAGE" >&2
+            exit 1
+            ;;
+        esac
+        REMOTE_SCRIPT
+        } | ssh "$DEPLOY_USER@$DEPLOY_HOST" "bash -s" | tee /tmp/deploy-compose-remote.log
+
+        if grep -q '^previous_image_lines_begin$' /tmp/deploy-compose-remote.log; then
+          LINES="$(sed -n '/^previous_image_lines_begin$/,/^previous_image_lines_end$/p' /tmp/deploy-compose-remote.log | sed '1d;$d')"
+        else
+          LINES=""
+        fi
+        {
+          echo "previous_image_lines<<__PREV_IMG_EOF__"
+          printf '%s\n' "$LINES"
+          echo "__PREV_IMG_EOF__"
+        } >> "$GITHUB_OUTPUT"

@@ -1,0 +1,71 @@
+name: Reusable - Validate Caller Config
+
+# Runs only resolve-project + load-config, no deploy side effects. Intended as a required PR
+# check so a caller's config mistake is caught before merge, not at deploy time.
+
+on:
+  workflow_call:
+    inputs:
+      project_name:
+        required: true
+        type: string
+      environment_name:
+        required: true
+        type: string
+      deploy_path:
+        required: false
+        type: string
+        default: ""
+      base_dir:
+        required: false
+        type: string
+        default: "/srv/stacks"
+      configuration_file:
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate ${{ inputs.project_name }}/${{ inputs.environment_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: project
+        uses: ./.github/actions/resolve-project
+        with:
+          project_name: ${{ inputs.project_name }}
+          environment_name: ${{ inputs.environment_name }}
+          deploy_path_override: ${{ inputs.deploy_path }}
+          base_dir: ${{ inputs.base_dir }}
+
+      - name: Determine configuration file path
+        id: config_path
+        shell: bash
+        env:
+          CONFIGURATION_FILE: ${{ inputs.configuration_file }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CONFIGURATION_FILE" ]; then
+            echo "path=$CONFIGURATION_FILE" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=.github/deploy/${ENVIRONMENT_NAME}.yml" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: ./.github/actions/load-config
+        with:
+          configuration_file: ${{ steps.config_path.outputs.path }}
+
+      - name: Validation passed
+        shell: bash
+        env:
+          DEPLOY_PATH: ${{ steps.project.outputs.deploy_path }}
+        run: |
+          echo "Project and config are valid. Resolved deploy path: $DEPLOY_PATH"

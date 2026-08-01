@@ -1,0 +1,79 @@
+name: "Deployment summary"
+description: "Writes a $GITHUB_STEP_SUMMARY entry covering the whole deploy run (Principle XI)."
+inputs:
+  project_name: { required: true }
+  environment_name: { required: true }
+  images_json:
+    description: 'JSON map of imageId -> "name:tag" actually deployed'
+    required: false
+    default: "{}"
+  previous_image_lines:
+    description: "Raw IMAGE/TAG lines read back from the server's previous .env, for manual rollback"
+    required: false
+    default: ""
+  migration_ran: { required: false, default: "false" }
+  reset_ran: { required: false, default: "false" }
+  seed_ran: { required: false, default: "false" }
+  backup_file: { required: false, default: "" }
+  health_results_json:
+    description: 'JSON array of {"name":..., "outcome":...}'
+    required: false
+    default: "[]"
+  overall_status:
+    description: "success | failure"
+    required: true
+  duration_seconds: { required: false, default: "0" }
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      env:
+        PROJECT_NAME: ${{ inputs.project_name }}
+        ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+        IMAGES_JSON: ${{ inputs.images_json }}
+        PREVIOUS_IMAGE_LINES: ${{ inputs.previous_image_lines }}
+        MIGRATION_RAN: ${{ inputs.migration_ran }}
+        RESET_RAN: ${{ inputs.reset_ran }}
+        SEED_RAN: ${{ inputs.seed_ran }}
+        BACKUP_FILE: ${{ inputs.backup_file }}
+        HEALTH_RESULTS_JSON: ${{ inputs.health_results_json }}
+        OVERALL_STATUS: ${{ inputs.overall_status }}
+        DURATION_SECONDS: ${{ inputs.duration_seconds }}
+      run: |
+        set -euo pipefail
+
+        {
+          echo "## Deploy summary: $PROJECT_NAME ($ENVIRONMENT_NAME)"
+          echo
+          echo "**Status**: $OVERALL_STATUS &nbsp;·&nbsp; **Duration**: ${DURATION_SECONDS}s"
+          echo
+          echo "### Images"
+          echo '| Image | Deployed ref |'
+          echo '|---|---|'
+          jq -r 'to_entries[] | "| \(.key) | \(.value) |"' <<< "$IMAGES_JSON"
+          if [ -n "$PREVIOUS_IMAGE_LINES" ]; then
+            echo
+            echo "Previous server state (for manual rollback, see docs/rollback.md):"
+            echo '```'
+            printf '%s\n' "$PREVIOUS_IMAGE_LINES"
+            echo '```'
+          fi
+          echo
+          echo "### Database"
+          echo "- Migration ran: $MIGRATION_RAN"
+          echo "- Reset ran: $RESET_RAN$( [ "$RESET_RAN" = "true" ] && echo ' ⚠️ DESTRUCTIVE OPERATION' )"
+          echo "- Seed ran: $SEED_RAN"
+          if [ -n "$BACKUP_FILE" ]; then
+            echo "- Pre-deploy backup: \`$BACKUP_FILE\` (kept for manual rollback)"
+          fi
+          echo
+          echo "### Health checks"
+          CONFIGURED=$(jq '[.[] | select(.name != "" and .name != null)] | length' <<< "$HEALTH_RESULTS_JSON")
+          if [ "$CONFIGURED" -gt 0 ]; then
+            echo '| Check | Outcome |'
+            echo '|---|---|'
+            jq -r '.[] | select(.name != "" and .name != null) | "| \(.name) | \(.outcome // "n/a") |"' <<< "$HEALTH_RESULTS_JSON"
+          else
+            echo "_No health checks configured._"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
