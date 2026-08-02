@@ -1,19 +1,26 @@
-name: "Run database command"
+name: "Run remote command"
 description: >-
-  Runs a caller-supplied, opaque shell command (migration/reset/seed) inside a named Compose
-  service via `docker compose run --rm`. The platform never inspects or special-cases the
-  command's content (see docs/adr/0005-project-specific-commands.md) — it is the caller's own
-  tool of choice, whatever that may be.
+  Runs a caller-supplied, opaque shell command inside a named Compose service via
+  `docker compose run --rm`. Originally scoped to migration/reset/seed; generalized in
+  Iteration 2 (docs/adr/0009-hooks.md) into the executor for all remote lifecycle hooks. The
+  platform never inspects or special-cases the command's content
+  (see docs/adr/0005-project-specific-commands.md) — it is the caller's own tool of choice.
 inputs:
   enabled: { required: false, default: "true" }
   label:
-    description: "Human label for logs/summary, e.g. migration, reset, seed"
+    description: "Human label for logs/summary, e.g. migration, reset, seed, hook:pre_deploy"
     required: true
   deploy_user: { required: true }
   deploy_host: { required: true }
   deploy_path: { required: true }
   compose_filename: { required: false, default: "docker-compose.yml" }
-  service: { required: true }
+  service:
+    description: >-
+      Compose service to run the command inside via `docker compose run --rm`. Leave empty to
+      run the command directly in a login shell on the remote host (in deploy_path) instead —
+      used by lifecycle hooks that aren't tied to one container.
+    required: false
+    default: ""
   command: { required: true }
 runs:
   using: "composite"
@@ -40,7 +47,11 @@ runs:
           exit 1
         fi
 
-        echo "Running $LABEL in service '$SERVICE'..."
+        if [ -n "$SERVICE" ]; then
+          echo "Running $LABEL in service '$SERVICE'..."
+        else
+          echo "Running $LABEL on the remote host..."
+        fi
 
         {
           printf 'DEPLOY_PATH=%q\n' "$DEPLOY_PATH"
@@ -50,6 +61,10 @@ runs:
           cat <<'REMOTE_SCRIPT'
         set -euo pipefail
         cd "$DEPLOY_PATH"
-        docker compose --env-file .env -f "$COMPOSE_FILENAME" run --rm -T "$SERVICE" sh -lc "$COMMAND" </dev/null
+        if [ -n "$SERVICE" ]; then
+          docker compose --env-file .env -f "$COMPOSE_FILENAME" run --rm -T "$SERVICE" sh -lc "$COMMAND" </dev/null
+        else
+          sh -lc "$COMMAND" </dev/null
+        fi
         REMOTE_SCRIPT
         } | ssh "$DEPLOY_USER@$DEPLOY_HOST" "bash -s"

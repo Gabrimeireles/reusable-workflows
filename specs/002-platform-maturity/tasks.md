@@ -54,7 +54,10 @@ produces 4 collected image refs with zero workflow changes.
 
 - [ ] T120 [P] [US2] `.github/plugins/postgres/plugin.mjs` — defaults for
       `database.backup`/health-check template; `validate()` requires `database.engine: postgres`
-- [ ] T121 [P] [US2] `.github/plugins/mysql/plugin.mjs`
+- [ ] T121 [P] [US2] ~~`.github/plugins/mysql/plugin.mjs`~~ — DROPPED during implementation: the
+      schema and `backup-postgres` only support `engine: postgres` today (iteration 1 scope); a
+      "mysql" plugin with no functional backup/health mechanism behind it would be misleading.
+      Documented as a known limitation in `docs/plugins.md`, not silently omitted.
 - [ ] T122 [P] [US2] `.github/plugins/redis/plugin.mjs` — default `dependencyServices` entry
 - [ ] T123 [P] [US2] `.github/plugins/prisma/plugin.mjs` — default migration/reset/seed command
       convention (`npx prisma migrate deploy`, etc.), `pre_migration` hook default

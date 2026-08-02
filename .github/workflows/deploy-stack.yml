@@ -209,6 +209,15 @@ jobs:
           # Migration command is always read (never used for reset)
           echo "db_migration_command=$(jqout '.database.migration.command // ""')" >> "$GITHUB_OUTPUT"
 
+          # Resolve every remote lifecycle hook (docs/adr/0009-hooks.md) to one final command
+          # string. pre_build/post_build are resolved by ci-cd.yml's own load job instead (they
+          # run on the runner, before this workflow is even called) — resolving them here too is
+          # harmless but unused when deploy-stack.yml is called directly (Pricely's draft).
+          for hook in pre_build post_build pre_backup post_backup pre_migration post_migration \
+                      pre_deploy post_deploy pre_healthcheck post_healthcheck pre_cleanup post_cleanup; do
+            echo "hook_${hook}=$(jqout ".hooks.${hook} // \"\" | if type == \"object\" then \"bash \" + .script else . end")" >> "$GITHUB_OUTPUT"
+          done
+
           if [ "$(jq '(.images // []) | length' <<< "$CONFIG")" -lt 1 ]; then
             echo "::error::config has no images defined"
             exit 1
@@ -242,6 +251,17 @@ jobs:
         with:
           ssh_private_key: ${{ secrets.DEPLOY_SSH_KEY }}
           deploy_host: ${{ secrets.DEPLOY_HOST }}
+
+      - name: "Hook: pre_deploy"
+        if: steps.resolve.outputs.hook_pre_deploy != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:pre_deploy"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_pre_deploy }}
 
       - name: Snapshot previous server state
         id: snapshot
@@ -301,6 +321,17 @@ jobs:
           github_repository_owner: ${{ github.repository_owner }}
           dependency_services: ${{ steps.resolve.outputs.dependency_services }}
 
+      - name: "Hook: pre_backup"
+        if: steps.resolve.outputs.db_enabled == 'true' && steps.resolve.outputs.hook_pre_backup != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:pre_backup"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_pre_backup }}
+
       - name: Backup database
         id: backup
         if: steps.resolve.outputs.db_enabled == 'true'
@@ -317,10 +348,32 @@ jobs:
           retention_days: ${{ steps.resolve.outputs.db_retention_days }}
           deploy_tag: ${{ steps.resolve.outputs.image_tag }}
 
+      - name: "Hook: post_backup"
+        if: steps.resolve.outputs.db_enabled == 'true' && steps.resolve.outputs.hook_post_backup != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:post_backup"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_post_backup }}
+
+      - name: "Hook: pre_migration"
+        if: steps.resolve.outputs.db_enabled == 'true' && steps.resolve.outputs.hook_pre_migration != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:pre_migration"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_pre_migration }}
+
       - name: Run database reset
         id: reset
         if: steps.resolve.outputs.db_enabled == 'true' && inputs.reset_database == true
-        uses: ./.github/actions/run-database-command
+        uses: ./.github/actions/run-remote-command
         with:
           label: "reset (DESTRUCTIVE)"
           deploy_user: ${{ secrets.DEPLOY_USER }}
@@ -333,7 +386,7 @@ jobs:
       - name: Run database migration
         id: migration
         if: steps.resolve.outputs.db_enabled == 'true' && inputs.reset_database == false
-        uses: ./.github/actions/run-database-command
+        uses: ./.github/actions/run-remote-command
         with:
           label: "migration"
           deploy_user: ${{ secrets.DEPLOY_USER }}
@@ -343,10 +396,21 @@ jobs:
           service: ${{ steps.resolve.outputs.db_migration_service }}
           command: ${{ steps.resolve.outputs.db_migration_command }}
 
+      - name: "Hook: post_migration"
+        if: steps.resolve.outputs.db_enabled == 'true' && steps.resolve.outputs.hook_post_migration != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:post_migration"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_post_migration }}
+
       - name: Run database seed
         id: seed
         if: steps.resolve.outputs.db_enabled == 'true' && inputs.run_seeders == true
-        uses: ./.github/actions/run-database-command
+        uses: ./.github/actions/run-remote-command
         with:
           label: "seed"
           deploy_user: ${{ secrets.DEPLOY_USER }}
@@ -365,6 +429,28 @@ jobs:
           deploy_path: ${{ steps.project.outputs.deploy_path }}
           compose_filename: ${{ steps.resolve.outputs.compose_destination }}
           application_services: ${{ steps.resolve.outputs.application_services }}
+
+      - name: "Hook: post_deploy"
+        if: steps.resolve.outputs.hook_post_deploy != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:post_deploy"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_post_deploy }}
+
+      - name: "Hook: pre_healthcheck"
+        if: steps.resolve.outputs.hook_pre_healthcheck != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:pre_healthcheck"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_pre_healthcheck }}
 
       - name: Health check 1
         id: hc1
@@ -433,6 +519,49 @@ jobs:
           command: ${{ steps.resolve.outputs.hc_4_command }}
           retries: ${{ steps.resolve.outputs.hc_4_retries }}
           interval_seconds: ${{ steps.resolve.outputs.hc_4_interval }}
+
+      - name: "Hook: post_healthcheck"
+        if: always() && steps.resolve.outputs.hook_post_healthcheck != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:post_healthcheck"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_post_healthcheck }}
+
+      - name: "Hook: pre_cleanup"
+        if: always() && steps.resolve.outputs.hook_pre_cleanup != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:pre_cleanup"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_pre_cleanup }}
+
+      - name: Cleanup (prune dangling images)
+        if: always()
+        uses: ./.github/actions/deploy-compose
+        with:
+          stage: cleanup
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+
+      - name: "Hook: post_cleanup"
+        if: always() && steps.resolve.outputs.hook_post_cleanup != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:post_cleanup"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_post_cleanup }}
 
       - name: Stop timer
         id: timer

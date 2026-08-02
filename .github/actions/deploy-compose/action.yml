@@ -2,13 +2,14 @@ name: "Deploy compose"
 description: >-
   Runs one stage of the remote docker compose lifecycle: "snapshot" (before any new file is
   uploaded — preserve the currently-running .env/compose for manual rollback), "start" (after
-  upload — GHCR login, pull, start dependency services), or "recreate" (after migration —
-  recreate application services, prune dangling images). Values are streamed to the remote
+  upload — GHCR login, pull, start dependency services), "recreate" (after migration — recreate
+  application services), or "cleanup" (prune dangling images — a separate stage from "recreate"
+  so pre_cleanup/post_cleanup hooks have something to wrap). Values are streamed to the remote
   shell over SSH stdin as bash-escaped assignments, never as command-line arguments or direct
   string interpolation.
 inputs:
   stage:
-    description: "snapshot | start | recreate"
+    description: "snapshot | start | recreate | cleanup"
     required: true
   deploy_user: { required: true }
   deploy_host: { required: true }
@@ -81,6 +82,8 @@ runs:
               # shellcheck disable=SC2086
               docker compose --env-file .env -f "$COMPOSE_FILENAME" up -d --force-recreate $APPLICATION_SERVICES
             fi
+            ;;
+          cleanup)
             docker image prune -f
             ;;
           *)
