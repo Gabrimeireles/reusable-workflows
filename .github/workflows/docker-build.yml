@@ -41,6 +41,28 @@ on:
         required: false
         type: string
         default: 'master'
+      artifact_id:
+        description: >-
+          When set, uploads a workflow artifact (image-<artifact_id>.json: {id, image, tag,
+          digest, size}) for a matrix caller (ci-cd.yml) to collect. Standalone callers that
+          don't set this get no artifact and no behavior change — purely additive.
+        required: false
+        type: string
+        default: ''
+      pre_build_command:
+        description: >-
+          Resolved pre_build hook command (docs/adr/0009-hooks.md), run on the runner before the
+          build. Empty = no-op. This workflow never inspects or resolves hooks itself — the
+          caller (ci-cd.yml) resolves the config's pre_build/post_build hook and passes the
+          final command here.
+        required: false
+        type: string
+        default: ''
+      post_build_command:
+        description: 'Resolved post_build hook command, run after a successful build/push.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -55,12 +77,20 @@ jobs:
       digest: ${{ steps.build.outputs.digest }}
       image: ${{ steps.owner.outputs.owner_image }}
       tag: ${{ steps.owner.outputs.sha_tag }}
+      size: ${{ steps.size.outputs.bytes }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
+
+      - name: pre_build hook
+        if: inputs.pre_build_command != ''
+        shell: bash
+        env:
+          COMMAND: ${{ inputs.pre_build_command }}
+        run: bash -c "$COMMAND"
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -161,6 +191,7 @@ jobs:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
           push: ${{ github.event_name != 'pull_request' }}
+          load: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
@@ -168,3 +199,48 @@ jobs:
             VCS_REF=${{ github.sha }}
             VERSION=${{ steps.version.outputs.version }}
             ${{ steps.build_args.outputs.rendered }}
+
+      - name: post_build hook
+        if: inputs.post_build_command != ''
+        shell: bash
+        env:
+          COMMAND: ${{ inputs.post_build_command }}
+        run: bash -c "$COMMAND"
+
+      - name: Measure image size
+        id: size
+        shell: bash
+        env:
+          IMAGE_REF: ${{ steps.owner.outputs.owner_image }}
+          TAG: ${{ steps.owner.outputs.sha_tag }}
+        run: |
+          set -euo pipefail
+          BYTES=$(docker image inspect "${IMAGE_REF}:${TAG}" --format='{{.Size}}' 2>/dev/null || echo "")
+          echo "bytes=$BYTES" >> "$GITHUB_OUTPUT"
+
+      - name: Render matrix collection artifact
+        if: inputs.artifact_id != ''
+        id: artifact_json
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          IMAGE_REF: ${{ steps.owner.outputs.owner_image }}
+          TAG: ${{ steps.owner.outputs.sha_tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SIZE: ${{ steps.size.outputs.bytes }}
+        run: |
+          set -euo pipefail
+          FILE="$RUNNER_TEMP/image-${ARTIFACT_ID}.json"
+          jq -n --arg id "$ARTIFACT_ID" --arg image "$IMAGE_REF" --arg tag "$TAG" \
+            --arg digest "$DIGEST" --arg size "$SIZE" \
+            '{id: $id, image: $image, tag: $tag, digest: $digest, size: ($size | tonumber? // null)}' \
+            > "$FILE"
+          echo "path=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload matrix collection artifact
+        if: inputs.artifact_id != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ inputs.artifact_id }}
+          path: ${{ steps.artifact_json.outputs.path }}
+          retention-days: 7
