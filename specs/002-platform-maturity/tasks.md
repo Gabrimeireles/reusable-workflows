@@ -139,7 +139,11 @@ produces a manifest that validates against its own schema.
 
 - [ ] T170 `release.yml`: add `update_major_tag` boolean input (default `true`); after tagging a
       non-prerelease `vX.Y.Z`, force-move `refs/tags/vX` to the same commit unless
-      `prerelease: true` or the input is `false`
+      `prerelease: true` or the input is `false`. Before moving, run `git merge-base
+      --is-ancestor <current vX target> <new commit>`; if the new commit is NOT a descendant
+      (e.g. a hotfix tagged from an older branch), skip the move and print a clear warning
+      naming both commits instead of regressing the floating tag (resolves the edge case
+      `spec.md` deferred to this plan — see `analysis-report.md` Finding 1)
 - [ ] T171 `tests/bats/release-major-tag.bats` — pure logic test of the "should move" decision
       (prerelease → no; input false → no; else → yes), without a real git push
 - [ ] T172 Update `docs/adr/0004-versioning-strategy.md` (done — amendment already recorded),

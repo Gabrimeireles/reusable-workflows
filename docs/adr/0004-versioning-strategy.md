@@ -48,7 +48,12 @@ The "separate, maintainer-triggered step" for moving the floating major tag is s
 `release.yml` now force-moves `refs/tags/vMAJOR` to the newly-tagged commit automatically,
 immediately after creating a non-prerelease `vMAJOR.MINOR.PATCH` tag, via a boolean input
 `update_major_tag` (default `true`) that a caller can set to `false` to opt out for a specific
-run. Prereleases never move the floating tag. This removes the manual step this ADR originally
-required, while keeping it a deliberate, per-run-overridable action rather than an unconditional
-one — see `specs/002-platform-maturity/spec.md` FR-080/FR-081 for the exact behavior and
+run. Prereleases never move the floating tag. Before moving it, the workflow verifies the new
+commit is a descendant of (or equal to) `vMAJOR`'s current target
+(`git merge-base --is-ancestor`); if it isn't (e.g. a hotfix tagged from an older branch), the
+move is skipped with an explicit warning naming both commits, rather than silently regressing
+the floating tag. This removes the manual step this ADR originally required, while keeping it a
+deliberate, per-run-overridable, non-regressing action rather than an unconditional one — see
+`specs/002-platform-maturity/spec.md` FR-070/FR-071/FR-072 for the exact behavior,
+`specs/002-platform-maturity/analysis-report.md` Finding 1 for the ancestry-check addition, and
 `specs/002-platform-maturity/clarify-log.md` Q3 for why this changed.

@@ -45,3 +45,11 @@ The declarative file:
 - Adds one moving part (a config file + its schema + its validator) that must be kept in sync;
   mitigated by `tests/unit/validate-config.test.mjs` running the validator against
   `tests/fixtures/config/{valid,invalid}/*.yml` in CI.
+
+**Update (Iteration 2)**: the validator's role expanded from a pure JSON-in/JSON-or-errors-out
+transform to one that also reads the checked-out caller repository from disk (Dockerfile/context/
+Compose file existence, Compose service names via `yq`) for semantic validation, and dynamically
+resolves plugins (`docs/adr/0007-plugin-architecture.md`). This is still zero new runtime
+dependencies — `fs`/`child_process` are Node built-ins and `yq` was already required — but is
+worth noting explicitly here since it's a broader responsibility than this ADR originally
+described.

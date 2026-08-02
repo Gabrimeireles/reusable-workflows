@@ -12,7 +12,9 @@ centrally.
 
 ## Decision
 
-`run-database-command` (composite action) takes a `command` string and a `service` name and
+`run-database-command` (composite action; renamed `run-remote-command` in Iteration 2 once it
+became the executor for all twelve lifecycle hooks, not just database ones — see
+`docs/adr/0009-hooks.md`) takes a `command` string and a `service` name and
 does exactly one thing: `docker compose exec -T <service> sh -lc "<command>"` (or `run --rm -T`
 for reset/seed, which may need the service not already running), with the command passed via an
 environment variable and `sh -lc "$COMMAND"` rather than direct `${{ }}` interpolation into the
