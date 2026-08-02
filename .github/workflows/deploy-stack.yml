@@ -33,6 +33,14 @@ on:
           share the same tag.
         required: true
         type: string
+      image_details:
+        description: >-
+          Optional JSON map of imageId -> {ref, digest, size}, for the release manifest. Only
+          populated when built via ci-cd.yml's matrix; empty ({}) is fine for direct
+          docker-build.yml callers — the manifest just omits digest/size in that case.
+        required: false
+        type: string
+        default: "{}"
       reset_database:
         description: "Drop/recreate the database before deploy. Only allowed on workflow_dispatch."
         required: false
@@ -206,8 +214,12 @@ jobs:
             done
           } >> "$GITHUB_OUTPUT"
 
-          # Migration command is always read (never used for reset)
-          echo "db_migration_command=$(jqout '.database.migration.command // ""')" >> "$GITHUB_OUTPUT"
+          {
+            # Migration command is always read (never used for reset)
+            echo "db_migration_command=$(jqout '.database.migration.command // ""')"
+            # Non-secret display label for observability (Principle III — never the real host)
+            echo "environment_label=$(jqout '.project.environmentLabel // ""')"
+          } >> "$GITHUB_OUTPUT"
 
           # Resolve every remote lifecycle hook (docs/adr/0009-hooks.md) to one final command
           # string. pre_build/post_build are resolved by ci-cd.yml's own load job instead (they
@@ -251,6 +263,10 @@ jobs:
         with:
           ssh_private_key: ${{ secrets.DEPLOY_SSH_KEY }}
           deploy_host: ${{ secrets.DEPLOY_HOST }}
+
+      - id: t_ssh_ready
+        shell: bash
+        run: echo "t=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: "Hook: pre_deploy"
         if: steps.resolve.outputs.hook_pre_deploy != ''
@@ -309,6 +325,10 @@ jobs:
           deploy_host: ${{ secrets.DEPLOY_HOST }}
           deploy_path: ${{ steps.project.outputs.deploy_path }}
 
+      - id: t_uploaded
+        shell: bash
+        run: echo "t=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - name: Start dependency services
         uses: ./.github/actions/deploy-compose
         with:
@@ -347,6 +367,11 @@ jobs:
           container_user: ${{ steps.resolve.outputs.db_container_user }}
           retention_days: ${{ steps.resolve.outputs.db_retention_days }}
           deploy_tag: ${{ steps.resolve.outputs.image_tag }}
+
+      - id: t_backed_up
+        if: always()
+        shell: bash
+        run: echo "t=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: "Hook: post_backup"
         if: steps.resolve.outputs.db_enabled == 'true' && steps.resolve.outputs.hook_post_backup != ''
@@ -420,6 +445,11 @@ jobs:
           service: ${{ steps.resolve.outputs.db_migration_service }}
           command: ${{ steps.resolve.outputs.db_seed_command }}
 
+      - id: t_migrated
+        if: always()
+        shell: bash
+        run: echo "t=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - name: Recreate application services
         uses: ./.github/actions/deploy-compose
         with:
@@ -429,6 +459,11 @@ jobs:
           deploy_path: ${{ steps.project.outputs.deploy_path }}
           compose_filename: ${{ steps.resolve.outputs.compose_destination }}
           application_services: ${{ steps.resolve.outputs.application_services }}
+
+      - id: t_recreated
+        if: always()
+        shell: bash
+        run: echo "t=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: "Hook: post_deploy"
         if: steps.resolve.outputs.hook_post_deploy != ''
@@ -531,6 +566,11 @@ jobs:
           compose_filename: ${{ steps.resolve.outputs.compose_destination }}
           command: ${{ steps.resolve.outputs.hook_post_healthcheck }}
 
+      - id: t_healthchecked
+        if: always()
+        shell: bash
+        run: echo "t=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - name: "Hook: pre_cleanup"
         if: always() && steps.resolve.outputs.hook_pre_cleanup != ''
         uses: ./.github/actions/run-remote-command
@@ -590,19 +630,51 @@ jobs:
             echo "status=success" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Deployment summary
-        id: summary
+      - name: Compute phase timings
+        id: timings
         if: always()
-        uses: ./.github/actions/deployment-summary
+        shell: bash
+        env:
+          T_SSH_READY: ${{ steps.t_ssh_ready.outputs.t }}
+          T_UPLOADED: ${{ steps.t_uploaded.outputs.t }}
+          T_BACKED_UP: ${{ steps.t_backed_up.outputs.t }}
+          T_MIGRATED: ${{ steps.t_migrated.outputs.t }}
+          T_RECREATED: ${{ steps.t_recreated.outputs.t }}
+          T_HEALTHCHECKED: ${{ steps.t_healthchecked.outputs.t }}
+        run: |
+          set -euo pipefail
+          diff_or_null() {
+            local a="$1" b="$2"
+            if [ -n "$a" ] && [ -n "$b" ]; then echo "$((b - a))"; else echo "null"; fi
+          }
+          UPLOAD=$(diff_or_null "$T_SSH_READY" "$T_UPLOADED")
+          BACKUP=$(diff_or_null "$T_UPLOADED" "$T_BACKED_UP")
+          MIGRATION=$(diff_or_null "$T_BACKED_UP" "$T_MIGRATED")
+          DEPLOY=$(diff_or_null "$T_MIGRATED" "$T_RECREATED")
+          HEALTHCHECK=$(diff_or_null "$T_RECREATED" "$T_HEALTHCHECKED")
+          echo "json={\"upload\":$UPLOAD,\"backup\":$BACKUP,\"migration\":$MIGRATION,\"deploy\":$DEPLOY,\"healthcheck\":$HEALTHCHECK}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release manifest
+        id: manifest
+        if: always()
+        uses: ./.github/actions/release-manifest
         with:
           project_name: ${{ inputs.project_name }}
           environment_name: ${{ inputs.environment_name }}
-          images_json: ${{ inputs.image_refs }}
+          environment_label: ${{ steps.resolve.outputs.environment_label }}
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          image_refs_json: ${{ inputs.image_refs }}
+          image_details_json: ${{ inputs.image_details }}
           previous_image_lines: ${{ steps.snapshot.outputs.previous_image_lines }}
+          compose_checksum: ${{ steps.prepare.outputs.compose_checksum }}
+          env_checksum: ${{ steps.prepare.outputs.env_checksum }}
+          backup_file: ${{ steps.backup.outputs.backup_file }}
           migration_ran: ${{ steps.migration.outcome == 'success' }}
           reset_ran: ${{ steps.reset.outcome == 'success' }}
           seed_ran: ${{ steps.seed.outcome == 'success' }}
-          backup_file: ${{ steps.backup.outputs.backup_file }}
           health_results_json: >-
             [
               {"name": "${{ steps.resolve.outputs.hc_1_name }}", "outcome": "${{ steps.hc1.outputs.outcome }}"},
@@ -610,5 +682,21 @@ jobs:
               {"name": "${{ steps.resolve.outputs.hc_3_name }}", "outcome": "${{ steps.hc3.outputs.outcome }}"},
               {"name": "${{ steps.resolve.outputs.hc_4_name }}", "outcome": "${{ steps.hc4.outputs.outcome }}"}
             ]
+          timings_json: ${{ steps.timings.outputs.json }}
           overall_status: ${{ job.status }}
           duration_seconds: ${{ steps.timer.outputs.elapsed }}
+
+      - name: Upload release manifest artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest-${{ inputs.project_name }}-${{ inputs.environment_name }}
+          path: ${{ steps.manifest.outputs.manifest_path }}
+          retention-days: 90
+
+      - name: Deployment summary
+        id: summary
+        if: always()
+        uses: ./.github/actions/deployment-summary
+        with:
+          manifest_json: ${{ steps.manifest.outputs.manifest_json }}

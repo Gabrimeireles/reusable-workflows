@@ -35,6 +35,12 @@ outputs:
   local_dir:
     description: "Local directory containing the rendered files, ready for upload"
     value: ${{ steps.render.outputs.local_dir }}
+  compose_checksum:
+    description: "sha256 of the rendered Compose file (for the release manifest — never the contents)"
+    value: ${{ steps.render.outputs.compose_checksum }}
+  env_checksum:
+    description: "sha256 of the rendered .env file (for the release manifest — never the contents)"
+    value: ${{ steps.render.outputs.env_checksum }}
 runs:
   using: "composite"
   steps:
@@ -107,4 +113,8 @@ runs:
         done
 
         find "$LOCAL_DIR" -type f -exec chmod 600 {} \;
-        echo "local_dir=$LOCAL_DIR" >> "$GITHUB_OUTPUT"
+        {
+          echo "local_dir=$LOCAL_DIR"
+          echo "compose_checksum=$(sha256sum "$LOCAL_DIR/$COMPOSE_DESTINATION_NAME" | cut -d' ' -f1)"
+          echo "env_checksum=$(sha256sum "$LOCAL_DIR/.env" | cut -d' ' -f1)"
+        } >> "$GITHUB_OUTPUT"

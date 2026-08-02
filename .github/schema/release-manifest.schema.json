@@ -1,0 +1,90 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Gabrimeireles/reusable-workflows/release-manifest.schema.json",
+  "title": "Reusable Workflows release manifest",
+  "description": "Written by .github/actions/release-manifest after every deploy-stack.yml run. See docs/adr/0010-release-manifest.md and docs/release-manifest.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifestVersion",
+    "project",
+    "environment",
+    "git",
+    "images",
+    "compose",
+    "timestamp",
+    "durationSeconds",
+    "overallStatus",
+    "rollbackCommand"
+  ],
+  "properties": {
+    "manifestVersion": { "const": 1 },
+    "project": { "type": "string" },
+    "environment": { "type": "string" },
+    "environmentLabel": { "type": "string" },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "branch", "actor"],
+      "properties": {
+        "commit": { "type": "string" },
+        "branch": { "type": "string" },
+        "actor": { "type": "string" }
+      }
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref"],
+        "properties": {
+          "ref": { "type": "string" },
+          "digest": { "type": ["string", "null"] },
+          "sizeBytes": { "type": ["integer", "null"] }
+        }
+      }
+    },
+    "previousImages": { "type": "string" },
+    "compose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "checksum"],
+      "properties": {
+        "file": { "type": "string" },
+        "checksum": { "type": "string" },
+        "envChecksum": { "type": "string" }
+      }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backupFile": { "type": ["string", "null"] },
+        "migrationRan": { "type": "boolean" },
+        "resetRan": { "type": "boolean" },
+        "seedRan": { "type": "boolean" }
+      }
+    },
+    "timings": {
+      "type": "object",
+      "additionalProperties": { "type": ["integer", "null"] }
+    },
+    "healthChecks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "outcome"],
+        "properties": {
+          "name": { "type": "string" },
+          "outcome": { "type": "string" }
+        }
+      }
+    },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "durationSeconds": { "type": "integer" },
+    "overallStatus": { "type": "string" },
+    "rollbackCommand": { "type": "string" }
+  }
+}

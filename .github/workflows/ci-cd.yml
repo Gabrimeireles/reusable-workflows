@@ -146,6 +146,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image_refs: ${{ steps.merge.outputs.image_refs }}
+      image_details: ${{ steps.merge.outputs.image_details }}
     steps:
       - name: Download all image artifacts
         uses: actions/download-artifact@v4
@@ -165,8 +166,10 @@ jobs:
             echo "::error::No image artifacts were collected — the build matrix produced nothing"
             exit 1
           fi
-          MERGED=$(jq -sc 'map({(.id): (.image + ":" + .tag)}) | add' "${files[@]}")
-          echo "image_refs=$MERGED" >> "$GITHUB_OUTPUT"
+          {
+            echo "image_refs=$(jq -sc 'map({(.id): (.image + ":" + .tag)}) | add' "${files[@]}")"
+            echo "image_details=$(jq -sc 'map({(.id): {ref: (.image + ":" + .tag), digest, size}}) | add' "${files[@]}")"
+          } >> "$GITHUB_OUTPUT"
 
   deploy:
     name: Deploy
@@ -179,6 +182,7 @@ jobs:
       base_dir: ${{ inputs.base_dir }}
       configuration_file: ${{ inputs.configuration_file }}
       image_refs: ${{ needs.collect.outputs.image_refs }}
+      image_details: ${{ needs.collect.outputs.image_details }}
       reset_database: ${{ inputs.reset_database }}
       run_seeders: ${{ inputs.run_seeders }}
       use_tailscale: ${{ inputs.use_tailscale }}

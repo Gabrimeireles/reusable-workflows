@@ -68,6 +68,7 @@ runs:
             fi
             echo "previous_image_lines_end"
             [ -f "$COMPOSE_FILENAME" ] && cp "$COMPOSE_FILENAME" "docker-compose.previous.yml"
+            [ -f "release-manifest.json" ] && cp "release-manifest.json" "release-manifest.previous.json"
             ;;
           start)
             echo "$GHCR_PAT" | docker login ghcr.io -u "$GITHUB_REPOSITORY_OWNER" --password-stdin
