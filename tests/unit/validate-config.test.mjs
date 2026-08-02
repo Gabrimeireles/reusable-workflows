@@ -47,6 +47,7 @@ for (const file of readdirSync(INVALID_DIR)) {
 // Each of these asserts the failure message names the SPECIFIC offending value, not just that
 // something failed (spec.md User Story 5 acceptance scenarios).
 const EXPECTED_MESSAGE_BY_FIXTURE = {
+  "build-args-real-secret.yml": /STRIPE_SECRET_KEY/,
   "missing-dockerfile.yml": /Dockerfile\.does-not-exist/,
   "missing-context.yml": /does-not-exist/,
   "missing-compose.yml": /docker-compose\.does-not-exist\.yml/,

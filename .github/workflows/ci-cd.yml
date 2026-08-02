@@ -135,6 +135,7 @@ jobs:
       dockerfile: ${{ matrix.image.dockerfile }}
       context: ${{ matrix.image.context }}
       version_file: ""
+      build_args: ${{ toJSON(matrix.image.buildArgs || fromJSON('{}')) }}
       default_branch: ${{ inputs.default_branch }}
       artifact_id: ${{ matrix.image.id }}
       pre_build_command: ${{ needs.load.outputs.pre_build_command }}

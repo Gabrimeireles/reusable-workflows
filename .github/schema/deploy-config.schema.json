@@ -50,7 +50,10 @@
           "buildArgs": {
             "type": "object",
             "additionalProperties": { "type": "string" },
-            "propertyNames": { "pattern": "^(?!.*(SECRET|TOKEN|PASSWORD|KEY)).*$" }
+            "propertyNames": {
+              "pattern": "^(?!.*(SECRET|TOKEN|PASSWORD|PRIVATE_?KEY|API_?KEY|ACCESS_?KEY)).*$",
+              "description": "Deliberately does not match bare 'KEY' — see docs/caller-contract.md; a name like VITE_STRIPE_PUBLISHABLE_KEY is not a secret."
+            }
           }
         }
       }
