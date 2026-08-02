@@ -27,6 +27,15 @@ on:
         required: false
         type: boolean
         default: false
+      update_major_tag:
+        description: >-
+          After tagging vX.Y.Z, also force-move the floating vX tag to the same commit (ADR
+          0004 amendment). Never happens for prereleases regardless of this input, and skipped
+          (with a warning) if the new commit is not a descendant of vX's current target, to
+          avoid regressing the floating tag from an out-of-order release.
+        required: false
+        type: boolean
+        default: true
     secrets:
       DISCORD_WEBHOOK_URL:
         required: false
@@ -94,6 +103,39 @@ jobs:
           git tag -a "$TAG" -m "Release $TAG"
           git push origin "$TAG"
 
+      - name: Move floating major tag
+        id: major_tag
+        if: steps.exists.outputs.exists != 'true' && inputs.update_major_tag && !inputs.prerelease
+        shell: bash
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          set -euo pipefail
+          MAJOR="v${VERSION%%.*}"
+          NEW_COMMIT=$(git rev-parse HEAD)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rev-parse "$MAJOR" >/dev/null 2>&1; then
+            CURRENT_COMMIT=$(git rev-parse "${MAJOR}^{commit}")
+            if [ "$CURRENT_COMMIT" = "$NEW_COMMIT" ]; then
+              echo "moved=false" >> "$GITHUB_OUTPUT"
+            elif git merge-base --is-ancestor "$CURRENT_COMMIT" "$NEW_COMMIT"; then
+              git tag -f "$MAJOR" "$NEW_COMMIT"
+              git push origin "$MAJOR" --force
+              echo "Moved floating tag $MAJOR -> $NEW_COMMIT"
+              echo "moved=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::Not moving $MAJOR: its current target $CURRENT_COMMIT is not an ancestor of the new release commit $NEW_COMMIT (this release was likely tagged from an older branch — moving would regress $MAJOR). Skipping."
+              echo "moved=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            git tag "$MAJOR" "$NEW_COMMIT"
+            git push origin "$MAJOR"
+            echo "Created floating tag $MAJOR -> $NEW_COMMIT"
+            echo "moved=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         if: steps.exists.outputs.exists != 'true'
         id: create_release
@@ -138,6 +180,8 @@ jobs:
           TAG: ${{ steps.vars.outputs.tag }}
           NEW_URL: ${{ steps.create_release.outputs.url }}
           EXISTING_URL: ${{ steps.existing_release.outputs.url }}
+          MAJOR: ${{ steps.major_tag.outputs.major }}
+          MOVED: ${{ steps.major_tag.outputs.moved }}
         run: |
           set -euo pipefail
           URL="${NEW_URL:-$EXISTING_URL}"
@@ -146,6 +190,13 @@ jobs:
             echo "- Version: $VERSION"
             echo "- Tag: $TAG"
             echo "- URL: $URL"
+            if [ -n "$MAJOR" ]; then
+              if [ "$MOVED" = "true" ]; then
+                echo "- Floating tag \`$MAJOR\` now points here"
+              else
+                echo "- Floating tag \`$MAJOR\` was NOT moved (see warnings above)"
+              fi
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Notify Discord
