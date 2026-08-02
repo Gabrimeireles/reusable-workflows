@@ -13,20 +13,24 @@ would be unsafe for a platform that treats migration/reset/seed commands as opaq
   reflect the prior running state.
 - **Every pre-deploy database backup**, verified with `pg_restore --list` and retained per the
   config's `database.backup.retentionDays` (never deleting the backup the current run just took).
-- **The deploy run's step summary**, listing the previous and new image references and the
-  backup file path used for that run.
+- **A `release-manifest.json`** on the server and as a workflow artifact (Iteration 2 — see
+  [`docs/release-manifest.md`](release-manifest.md)), with a literal `rollbackCommand` field —
+  copy-paste it instead of retyping the command below. The previous run's manifest is preserved
+  as `release-manifest.previous.json` alongside the previous `.env`/Compose files.
+- **The deploy run's step summary**, rendered from that manifest, listing the previous and new
+  image references, the backup file path, and the rollback command.
 
 ## Rolling back the application (containers only)
 
-On the server, in the deploy path (`/srv/stacks/<project>`):
+Read `rollbackCommand` from `release-manifest.json` (or the run's step summary) and run it
+verbatim on the server, in the deploy path (`/srv/stacks/<project>`). It is exactly:
 
 ```sh
-docker compose --env-file .env.previous -f docker-compose.previous.yml pull
 docker compose --env-file .env.previous -f docker-compose.previous.yml up -d --force-recreate
 ```
 
-This restores the previously-running images and Compose configuration. It does **not** touch the
-database.
+(add a `pull` first if the previous images may have been pruned locally). This restores the
+previously-running images and Compose configuration. It does **not** touch the database.
 
 ## Rolling back the database
 

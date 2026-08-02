@@ -53,7 +53,41 @@ call feeding into the same deploy must run against the same commit.
 No, if it's `CoGuide_PPS_BackEnd`, `CoGuide_PPS_FrontEnd`, or `Conecta_SLA` referencing
 `docker-deploy-ssh.yml`/`github-release.yml`/`swagger-pages.yml` at a pinned tag — those are
 intentionally kept unchanged (see [`README.md`](../README.md)). New projects should use
-`deploy-stack.yml`/`release.yml` instead.
+`ci-cd.yml` (or `deploy-stack.yml`/`release.yml` directly) instead.
+
+## "unknown plugin 'X'"
+
+Nothing under `.github/plugins/X/plugin.mjs` exists in the pinned version of this repository you
+reference. Check the spelling and the shipped list in [`docs/plugins.md`](plugins.md), or that
+you're pinned to a ref that actually includes the plugin you want.
+
+## "unknown hook name"
+
+Hook keys are a fixed set of twelve — see [`docs/hooks.md`](hooks.md). A typo (`pre_healtchek`)
+or an invented name (`pre_launch_party`) fails validation with the exact list of valid names.
+
+## "No image artifacts were collected — the build matrix produced nothing"
+
+`ci-cd.yml`'s `collect` job found zero `image-*` artifacts after the `build` matrix ran. This
+means every matrix instance either failed before reaching its artifact-upload step, or your
+config's `images` list was empty (should already be rejected by schema validation upstream — if
+you see this, check the `build` job's logs for the real underlying failure per image).
+
+## "not a descendant" warning during a release
+
+`release.yml`'s floating major-tag move was skipped because the new release commit isn't a
+descendant of the tag's current target — usually means you tagged a release from an older branch
+(e.g. a hotfix) than what `vMAJOR` currently points to. This is intentional (it would otherwise
+regress the floating tag) — move the tag manually if you're sure it's what you want:
+`git tag -f vMAJOR <commit> && git push origin vMAJOR --force`.
+
+## Where's the digest/size for an image built via `docker-build.yml` directly (not `ci-cd.yml`)?
+
+`digest`/`size` are always computed as job outputs; they only flow into the release manifest
+when built through `ci-cd.yml`'s matrix (which threads `image_details` through to
+`deploy-stack.yml`). A direct `docker-build.yml` + `deploy-stack.yml` caller (e.g. Pricely's
+current draft) gets a manifest with `digest`/`sizeBytes` as `null` — read them from that build
+job's own outputs instead if you need them.
 
 ## Something in this repository's own CI is failing
 

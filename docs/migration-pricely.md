@@ -18,7 +18,7 @@ this migration.
 | Compose/env file upload | Inline `scp` of `.deploy/{docker-compose.yml,.env,.env.backend,.env.web}` | `prepare-deploy-files` + `upload-deploy-files` |
 | Remote GHCR login, pull, dependency startup | Inline SSH heredoc | `deploy-compose` stage `start` |
 | Postgres wait/backup/verify/retention | Inline SSH heredoc | `backup-postgres` |
-| Migration / reset / seed | Inline `npm run db:...` commands | `run-database-command`, commands supplied via `.github/deploy/homolog.yml` |
+| Migration / reset / seed | Inline `npm run db:...` commands | `run-remote-command`, commands supplied via `.github/deploy/homolog.yml` |
 | Service recreation + image prune | Inline SSH heredoc | `deploy-compose` stage `recreate` |
 | Internal + public health checks | Inline loops | Two `health-check` steps (compose + http) from config |
 | Summary/diagnostics | `docker compose logs` on web-not-ready only | `deployment-summary` (always), plus per-action failure diagnostics |

@@ -17,6 +17,11 @@ Start from `tests/fixtures/config/valid/single-image.yml` (no database) or
 `tests/fixtures/config/valid/pricely-homolog.yml` (full example with database + health checks)
 in this repository, and adjust. Full field reference: [`docs/caller-contract.md`](caller-contract.md).
 
+If your stack matches a shipped plugin (Postgres, Prisma, NestJS, Next.js, Vite — see
+[`docs/plugins.md`](plugins.md)), declare `plugins: [...]` and skip writing the fields it
+defaults for you. Need something to run at a specific point in the deploy (cache purge, cache
+warm-up, ...)? See [`docs/hooks.md`](hooks.md).
+
 ## 3. Add secrets to your repository
 
 At minimum: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `GHCR_PAT`. If your Compose file
@@ -28,10 +33,15 @@ If you use Tailscale, add `TS_OAUTH_CLIENT_ID`/`TS_OAUTH_SECRET`.
 
 ## 4. Write the caller workflow
 
-Copy the example in the main [`README.md`](../README.md#minimal-caller-example) and adjust
-`image_name`, `dockerfile`, `context`, `project_name`, `environment_name`, and the `secrets:`
-map. Keep the `secrets:` map explicit (not `secrets: inherit` — see
+Copy the example in the main [`README.md`](../README.md#minimal-caller-example) — it calls
+`ci-cd.yml`, which builds every image your config declares (as a matrix, no per-image job
+needed) and then deploys. Adjust `project_name`, `environment_name`, and the `secrets:` map.
+Keep the `secrets:` map explicit (not `secrets: inherit` — see
 [`docs/secrets-and-environments.md`](secrets-and-environments.md)).
+
+`docker-build.yml`/`deploy-stack.yml` remain directly callable if you need more control over the
+build step than the matrix gives you (see [`docs/caller-contract.md`](caller-contract.md)) — but
+`ci-cd.yml` is the shortest path for a new project.
 
 ## 5. (Optional) Add a config-validation PR check
 

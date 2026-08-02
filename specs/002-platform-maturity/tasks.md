@@ -160,16 +160,38 @@ produces a manifest that validates against its own schema.
       config fields, `run-remote-command` rename
 - [ ] T182 [P] `README.md` — shrink the minimal caller example to the two-file target (spec
       FR-080), using `ci-cd.yml`
-- [ ] T183 Grep-based test update (`tests/bats/no-project-literals.bats`) to also cover
-      `.github/plugins/`
-- [ ] T184 `make validate` / `ci.yml`: add the new fixture directories and renamed action to the
-      shellcheck/bats globs (should be automatic given existing glob patterns — verify, don't
-      assume)
-- [ ] T185 Full `/speckit-analyze`-equivalent pass (project task #23) before implementation is
-      considered complete
-- [ ] T186 Update `Pricely/migrate/reusable-workflows-v1` draft to call `ci-cd.yml` instead of
-      building backend/web as two separate jobs, demonstrating the consumer-experience win
-      end-to-end (still `workflow_dispatch`-only, still not cut over)
+- [x] T183 SKIPPED BY DESIGN, not silently: `.github/plugins/` is intentionally excluded from
+      `no-project-literals.bats`'s scope — a plugin's entire purpose is to name a specific tool
+      (`prisma`, `postgres`, ...), so the "no project/tool literal" check would flag every
+      plugin's own file for doing exactly what it's supposed to do. The check still covers
+      `.github/workflows` and `.github/actions`, which is where Principle VIII actually applies.
+- [x] T184 Verified: `make validate`'s existing glob patterns (`.github/scripts`, `tests/bats`,
+      `tests/unit/*.test.mjs`) already pick up every new/renamed file without any Makefile/ci.yml
+      change needed.
+- [x] T185 Done — see `specs/002-platform-maturity/analysis-report.md`.
+- [ ] T186 DEFERRED (follow-up, not part of this iteration's delivery): update
+      `Pricely/migrate/reusable-workflows-v1`'s draft caller to use `ci-cd.yml` instead of two
+      explicit `docker-build.yml` jobs. Out of scope for this pass — the request was scoped to
+      the platform repository; flagged in the closing report as a suggested next step, not
+      dropped silently.
+
+## Note on the coupling-reduction recommendation (analysis §3.10.1)
+
+The architecture analysis proposed moving `deploy-stack.yml`'s config-shape knowledge out of its
+inline "Resolve config-derived values" step and into each composite action (passing JSON slices
+instead of ~40 pre-flattened named outputs). Implementing the rest of this iteration surfaced why
+that specific refactor has diminishing returns given GitHub Actions' real constraints: the
+positional `ENV_FILE_1..6` secrets and the 4 health-check slots **must** be individually named in
+the workflow YAML regardless (GitHub Actions cannot loop over secrets or dynamically expand a
+`with:` block), so passing "a JSON slice" instead would only move where the per-slot unrolling
+happens, not remove it. This is deliberately **not implemented** as a full refactor in this
+iteration — the honest assessment, reached by actually attempting it, differs from the
+analysis's initial recommendation, and that's recorded here rather than silently either doing a
+low-value change or silently dropping the recommendation. A future iteration could still revisit
+the *narrower* win (composite actions doing their own `jq` extraction from one JSON blob instead
+of receiving individually-named scalar inputs for config-derived — not secret-derived — values,
+e.g. `backup-postgres` accepting one `database_json` instead of 6 separate inputs), which doesn't
+run into the same secret-declaration wall.
 
 ## Dependencies & Execution Order
 
