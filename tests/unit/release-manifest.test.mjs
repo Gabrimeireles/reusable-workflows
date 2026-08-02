@@ -31,7 +31,7 @@ function sampleManifest() {
     },
     database: { backupFile: "backups/pre-deploy-sha-abc1234-20260101T000000Z.dump", migrationRan: true, resetRan: false, seedRan: false },
     timings: { upload: 3, backup: 12, migration: 5, deploy: 8, healthcheck: 20 },
-    healthChecks: [{ name: "web", outcome: "success" }],
+    healthChecks: [{ name: "web", outcome: "success", attempts: "3" }],
     timestamp: "2026-01-01T00:00:00Z",
     durationSeconds: 60,
     overallStatus: "success",

@@ -20,6 +20,9 @@ outputs:
   outcome:
     description: "success | failure"
     value: ${{ steps.check.outputs.outcome }}
+  attempts_used:
+    description: "How many attempts it took (for the release manifest / summary)"
+    value: ${{ steps.check.outputs.attempts_used }}
 runs:
   using: "composite"
   steps:
@@ -48,15 +51,21 @@ runs:
           for attempt in $(seq 1 "$RETRIES"); do
             STATUS_CODE=$(curl -sS -L --connect-timeout 5 --max-time 15 -o /tmp/health-body -w '%{http_code}' "$URL" || true)
             if echo "$STATUS_CODE" | grep -q '^2[0-9][0-9]$'; then
-              echo "Health check '$NAME' passed (HTTP $STATUS_CODE)"
-              echo "outcome=success" >> "$GITHUB_OUTPUT"
+              echo "Health check '$NAME' passed (HTTP $STATUS_CODE, attempt $attempt/$RETRIES)"
+              {
+                echo "outcome=success"
+                echo "attempts_used=$attempt"
+              } >> "$GITHUB_OUTPUT"
               exit 0
             fi
             [ "$attempt" -lt "$RETRIES" ] && sleep "$INTERVAL_SECONDS"
           done
           echo "::error::Health check '$NAME' failed after $RETRIES attempts"
           cat /tmp/health-body 2>/dev/null || true
-          echo "outcome=failure" >> "$GITHUB_OUTPUT"
+          {
+            echo "outcome=failure"
+            echo "attempts_used=$RETRIES"
+          } >> "$GITHUB_OUTPUT"
           exit 1
 
         elif [ "$TYPE" = "compose" ]; then
@@ -78,26 +87,36 @@ runs:
         cd "$DEPLOY_PATH"
         for attempt in $(seq 1 "$RETRIES"); do
           if docker compose --env-file .env -f "$COMPOSE_FILENAME" exec -T "$SERVICE" sh -lc "$COMMAND" </dev/null; then
+            echo "ATTEMPTS_USED=$attempt"
             exit 0
           fi
           if [ "$attempt" -eq "$RETRIES" ]; then
             echo "Health check command did not succeed after $RETRIES attempts" >&2
             docker compose --env-file .env -f "$COMPOSE_FILENAME" logs --tail=120 "$SERVICE" || true
+            echo "ATTEMPTS_USED=$RETRIES"
             exit 1
           fi
           sleep "$INTERVAL_SECONDS"
         done
         REMOTE_SCRIPT
-          } | ssh "$DEPLOY_USER@$DEPLOY_HOST" "bash -s"
+          } | ssh "$DEPLOY_USER@$DEPLOY_HOST" "bash -s" | tee /tmp/health-check-remote.log
           STATUS=$?
           set -e
 
+          ATTEMPTS=$(grep '^ATTEMPTS_USED=' /tmp/health-check-remote.log | tail -1 | cut -d= -f2)
+
           if [ "$STATUS" -eq 0 ]; then
             echo "Health check '$NAME' passed"
-            echo "outcome=success" >> "$GITHUB_OUTPUT"
+            {
+              echo "outcome=success"
+              echo "attempts_used=${ATTEMPTS:-1}"
+            } >> "$GITHUB_OUTPUT"
           else
             echo "::error::Health check '$NAME' failed"
-            echo "outcome=failure" >> "$GITHUB_OUTPUT"
+            {
+              echo "outcome=failure"
+              echo "attempts_used=${ATTEMPTS:-$RETRIES}"
+            } >> "$GITHUB_OUTPUT"
             exit 1
           fi
         else

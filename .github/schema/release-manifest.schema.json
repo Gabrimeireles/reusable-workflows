@@ -78,7 +78,8 @@
         "required": ["name", "outcome"],
         "properties": {
           "name": { "type": "string" },
-          "outcome": { "type": "string" }
+          "outcome": { "type": "string" },
+          "attempts": { "type": ["string", "integer", "null"] }
         }
       }
     },

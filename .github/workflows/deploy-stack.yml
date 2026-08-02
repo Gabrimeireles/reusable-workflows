@@ -677,10 +677,10 @@ jobs:
           seed_ran: ${{ steps.seed.outcome == 'success' }}
           health_results_json: >-
             [
-              {"name": "${{ steps.resolve.outputs.hc_1_name }}", "outcome": "${{ steps.hc1.outputs.outcome }}"},
-              {"name": "${{ steps.resolve.outputs.hc_2_name }}", "outcome": "${{ steps.hc2.outputs.outcome }}"},
-              {"name": "${{ steps.resolve.outputs.hc_3_name }}", "outcome": "${{ steps.hc3.outputs.outcome }}"},
-              {"name": "${{ steps.resolve.outputs.hc_4_name }}", "outcome": "${{ steps.hc4.outputs.outcome }}"}
+              {"name": "${{ steps.resolve.outputs.hc_1_name }}", "outcome": "${{ steps.hc1.outputs.outcome }}", "attempts": "${{ steps.hc1.outputs.attempts_used }}"},
+              {"name": "${{ steps.resolve.outputs.hc_2_name }}", "outcome": "${{ steps.hc2.outputs.outcome }}", "attempts": "${{ steps.hc2.outputs.attempts_used }}"},
+              {"name": "${{ steps.resolve.outputs.hc_3_name }}", "outcome": "${{ steps.hc3.outputs.outcome }}", "attempts": "${{ steps.hc3.outputs.attempts_used }}"},
+              {"name": "${{ steps.resolve.outputs.hc_4_name }}", "outcome": "${{ steps.hc4.outputs.outcome }}", "attempts": "${{ steps.hc4.outputs.attempts_used }}"}
             ]
           timings_json: ${{ steps.timings.outputs.json }}
           overall_status: ${{ job.status }}

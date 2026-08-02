@@ -64,9 +64,9 @@ runs:
           echo "### Health checks"
           HC_COUNT=$(jq '.healthChecks // [] | length' <<< "$MANIFEST_JSON")
           if [ "$HC_COUNT" -gt 0 ]; then
-            echo '| Check | Outcome |'
-            echo '|---|---|'
-            jq -r '.healthChecks[] | "| \(.name) | \(.outcome) |"' <<< "$MANIFEST_JSON"
+            echo '| Check | Outcome | Attempts |'
+            echo '|---|---|---|'
+            jq -r '.healthChecks[] | "| \(.name) | \(.outcome) | \(.attempts // "n/a") |"' <<< "$MANIFEST_JSON"
           else
             echo "_No health checks configured._"
           fi
