@@ -1,0 +1,9 @@
+services:
+  app:
+    image: sampleapp
+  api:
+    image: sampleapp-api
+  worker:
+    image: sampleapp-worker
+  web:
+    image: sampleapp-web

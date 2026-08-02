@@ -1,0 +1,21 @@
+version: 1
+
+project:
+  name: sampleapp
+
+images:
+  - id: app
+    name: sampleapp
+    context: .
+    dockerfile: ./Dockerfile
+
+compose:
+  source: docker-compose.yml
+  applicationServices: [app]
+
+hooks:
+  pre_build: "echo pre-build"
+  post_build: { script: "./scripts/post-build.sh" }
+  pre_deploy: "echo pre-deploy"
+  post_deploy: "echo post-deploy"
+  post_cleanup: "echo post-cleanup"

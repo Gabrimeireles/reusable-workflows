@@ -1,0 +1,23 @@
+version: 1
+
+project:
+  name: sampleapp
+
+images:
+  - id: app
+    name: sampleapp
+    context: .
+    dockerfile: ./Dockerfile
+
+compose:
+  source: docker-compose.homolog.yml
+  dependencyServices: [postgres]
+  applicationServices: [backend, web]
+
+database:
+  containerDatabase: sampleapp
+  migration:
+    service: backend
+    # command comes from the prisma plugin default
+
+plugins: [postgres, prisma, vite]

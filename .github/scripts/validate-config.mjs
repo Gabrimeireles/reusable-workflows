@@ -1,13 +1,23 @@
 #!/usr/bin/env node
-// Hand-written structural validator for the declarative deploy config
+// Structural + semantic validator for the declarative deploy config
 // (.github/schema/deploy-config.schema.json is the documented source of truth this
 // mirrors). Deliberately dependency-free (no ajv/jsonschema) — see
-// docs/adr/0003-config-model.md and specs/001-reusable-ci-platform/research.md R5.
+// docs/adr/0003-config-model.md and specs/001-reusable-ci-platform/research.md R5. Iteration 2
+// (docs/adr/0007-plugin-architecture.md) adds plugin resolution and filesystem/Compose-aware
+// semantic checks — see the "Update (Iteration 2)" note in ADR 0003.
 //
 // Usage: node validate-config.mjs < config.json
-// Reads JSON on stdin (the caller is expected to convert YAML -> JSON with `yq` first).
-// On success: prints the (defaults-applied) config as compact JSON on stdout, exits 0.
+// Reads JSON on stdin (the caller is expected to convert YAML -> JSON with `yq` first). Resolves
+// plugins first (so their defaults can satisfy required fields), then runs structural checks on
+// the merged config, then semantic checks against the current working directory (expected to be
+// the checked-out caller repository root).
+// On success: prints the merged config as compact JSON on stdout, exits 0.
 // On failure: prints every error found, one per line, to stderr, exits 1.
+import fs from "node:fs";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { resolvePlugins } from "./lib/plugin-loader.mjs";
 
 const NAME_RE = /^[a-z][a-z0-9-]{1,48}$/;
 const SHORT_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
@@ -17,6 +27,22 @@ const ENV_FILENAME_RE = /^\.[a-zA-Z0-9._-]*[a-zA-Z0-9]$/;
 const COMPOSE_FILENAME_RE = /^[a-zA-Z0-9._-]+$/;
 const SECRET_LOOKING_KEY_RE = /(SECRET|TOKEN|PASSWORD|KEY)/i;
 const MAX_ENV_FILES = 6;
+const MAX_HEALTH_CHECKS = 4;
+const HOOK_NAMES = [
+  "pre_build",
+  "post_build",
+  "pre_backup",
+  "post_backup",
+  "pre_migration",
+  "post_migration",
+  "pre_deploy",
+  "post_deploy",
+  "pre_healthcheck",
+  "post_healthcheck",
+  "pre_cleanup",
+  "post_cleanup",
+];
+const PLUGINS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "plugins");
 
 const errors = [];
 function fail(path, message) {
@@ -48,6 +74,8 @@ function validate(config) {
     "environmentFiles",
     "database",
     "healthChecks",
+    "plugins",
+    "hooks",
   ]);
   for (const key of Object.keys(config)) {
     if (!allowedTop.has(key)) fail("$", `unexpected top-level key '${key}'`);
@@ -125,11 +153,18 @@ function validate(config) {
     } else if (config.environmentFiles.length > MAX_ENV_FILES) {
       fail("$.environmentFiles", `supports at most ${MAX_ENV_FILES} entries (positional ENV_FILE_1..ENV_FILE_${MAX_ENV_FILES})`);
     } else {
+      const seenDestinations = new Map();
       config.environmentFiles.forEach((ef, i) => {
         const p = `$.environmentFiles[${i}]`;
         if (!isPlainObject(ef)) { fail(p, "must be an object"); return; }
         if (typeof ef.secret !== "string" || !SECRET_LABEL_RE.test(ef.secret)) fail(`${p}.secret`, `must match ${SECRET_LABEL_RE} (documentation label only)`);
-        if (typeof ef.destination !== "string" || !ENV_FILENAME_RE.test(ef.destination)) fail(`${p}.destination`, `must match ${ENV_FILENAME_RE}`);
+        if (typeof ef.destination !== "string" || !ENV_FILENAME_RE.test(ef.destination)) {
+          fail(`${p}.destination`, `must match ${ENV_FILENAME_RE}`);
+        } else if (seenDestinations.has(ef.destination)) {
+          fail(`${p}.destination`, `duplicate destination '${ef.destination}' (also used by entry ${seenDestinations.get(ef.destination)}) — one would silently overwrite the other`);
+        } else {
+          seenDestinations.set(ef.destination, i);
+        }
         if (ef.required !== undefined && typeof ef.required !== "boolean") fail(`${p}.required`, "must be a boolean");
       });
     }
@@ -176,6 +211,8 @@ function validate(config) {
   if (config.healthChecks !== undefined) {
     if (!Array.isArray(config.healthChecks)) {
       fail("$.healthChecks", "must be an array");
+    } else if (config.healthChecks.length > MAX_HEALTH_CHECKS) {
+      fail("$.healthChecks", `supports at most ${MAX_HEALTH_CHECKS} entries (the reusable workflow has ${MAX_HEALTH_CHECKS} inline slots — see docs/adr's clarify-log Q2)`);
     } else {
       config.healthChecks.forEach((hc, i) => {
         const p = `$.healthChecks[${i}]`;
@@ -192,6 +229,121 @@ function validate(config) {
       });
     }
   }
+
+  // plugins (names only — existence of the plugin directory is checked during resolution,
+  // before this structural pass even runs; see the bottom of this file)
+  if (config.plugins !== undefined) {
+    if (!Array.isArray(config.plugins)) {
+      fail("$.plugins", "must be an array of plugin names");
+    } else {
+      const seen = new Set();
+      config.plugins.forEach((name, i) => {
+        if (typeof name !== "string" || !SHORT_NAME_RE.test(name)) {
+          fail(`$.plugins[${i}]`, `must match ${SHORT_NAME_RE}`);
+        } else if (seen.has(name)) {
+          fail(`$.plugins[${i}]`, `duplicate plugin '${name}'`);
+        } else {
+          seen.add(name);
+        }
+      });
+    }
+  }
+
+  // hooks
+  if (config.hooks !== undefined) {
+    if (!isPlainObject(config.hooks)) {
+      fail("$.hooks", "must be an object");
+    } else {
+      for (const [hookName, value] of Object.entries(config.hooks)) {
+        const p = `$.hooks.${hookName}`;
+        if (!HOOK_NAMES.includes(hookName)) {
+          fail(p, `unknown hook name (must be one of: ${HOOK_NAMES.join(", ")})`);
+          continue;
+        }
+        const isInlineCommand = typeof value === "string" && value.length > 0;
+        const isScriptRef = isPlainObject(value) && typeof value.script === "string" && value.script.length > 0;
+        if (!isInlineCommand && !isScriptRef) {
+          fail(p, "must be a non-empty command string, or an object { script: '<path>' }");
+        }
+      }
+    }
+  }
+}
+
+// Semantic checks that need the checked-out caller repository on disk (Iteration 2 — spec.md
+// User Story 5). `cwd` is expected to be the caller repository root, which is true whenever this
+// script runs as part of `load-config` (checkout always happens first in every workflow that
+// calls it).
+function validateSemantics(config, cwd) {
+  if (!isPlainObject(config)) return;
+
+  if (isPlainObject(config.compose) && typeof config.compose.source === "string") {
+    const composePath = path.resolve(cwd, config.compose.source);
+    if (!fs.existsSync(composePath)) {
+      fail("$.compose.source", `file does not exist: '${config.compose.source}'`);
+    }
+  }
+
+  if (Array.isArray(config.images)) {
+    config.images.forEach((img, i) => {
+      if (!isPlainObject(img)) return;
+      const p = `$.images[${i}]`;
+      if (typeof img.dockerfile === "string" && !fs.existsSync(path.resolve(cwd, img.dockerfile))) {
+        fail(`${p}.dockerfile`, `file does not exist: '${img.dockerfile}'`);
+      }
+      if (typeof img.context === "string" && !fs.existsSync(path.resolve(cwd, img.context))) {
+        fail(`${p}.context`, `directory does not exist: '${img.context}'`);
+      }
+    });
+  }
+
+  // Cross-check every referenced service name against the Compose file's own `services:` keys.
+  // Only attempted when the Compose file itself exists (already reported above otherwise).
+  let composeServices = null;
+  if (isPlainObject(config.compose) && typeof config.compose.source === "string") {
+    const composePath = path.resolve(cwd, config.compose.source);
+    if (fs.existsSync(composePath)) {
+      try {
+        const out = execFileSync("yq", ["-o=json", "eval", ".services | keys", composePath], {
+          encoding: "utf8",
+        });
+        composeServices = new Set(JSON.parse(out || "[]"));
+      } catch {
+        fail("$.compose.source", `could not be parsed as a Compose file with a 'services:' map: '${config.compose.source}'`);
+      }
+    }
+  }
+
+  function checkServiceRef(refPath, serviceName) {
+    if (typeof serviceName !== "string" || !composeServices) return;
+    if (!composeServices.has(serviceName)) {
+      fail(refPath, `service '${serviceName}' is not declared under 'services:' in ${config.compose?.source}`);
+    }
+  }
+
+  if (isPlainObject(config.compose)) {
+    (config.compose.dependencyServices || []).forEach((s, i) =>
+      checkServiceRef(`$.compose.dependencyServices[${i}]`, s)
+    );
+    (config.compose.applicationServices || []).forEach((s, i) =>
+      checkServiceRef(`$.compose.applicationServices[${i}]`, s)
+    );
+  }
+  if (isPlainObject(config.database) && config.database.enabled) {
+    checkServiceRef("$.database.composeService", config.database.composeService);
+    if (isPlainObject(config.database.migration)) {
+      checkServiceRef("$.database.migration.service", config.database.migration.service);
+    }
+  }
+  (config.healthChecks || []).forEach((hc, i) => {
+    if (isPlainObject(hc) && hc.type === "compose") {
+      checkServiceRef(`$.healthChecks[${i}].service`, hc.service);
+    }
+  });
+
+  // plugin existence is checked during resolution (before this function runs), but a plugin
+  // declared with a name that fails the SHORT_NAME_RE pattern never reaches resolution — that's
+  // already reported by the structural check above, nothing further needed here.
 }
 
 function readStdin() {
@@ -205,15 +357,26 @@ function readStdin() {
 }
 
 const raw = await readStdin();
-let config;
+let rawConfig;
 try {
-  config = JSON.parse(raw);
+  rawConfig = JSON.parse(raw);
 } catch (e) {
   console.error(`Invalid JSON input: ${e.message}`);
   process.exit(1);
 }
 
+// Resolve plugins first, so their defaults can satisfy fields the structural pass requires
+// (e.g. the `postgres` plugin defaulting `database.enabled: true`). If `plugins` isn't even an
+// array, skip resolution silently here — the structural pass below reports the type error.
+const declaredPlugins = Array.isArray(rawConfig?.plugins) ? rawConfig.plugins : [];
+const { config, issues: pluginIssues } = declaredPlugins.length
+  ? await resolvePlugins(rawConfig, PLUGINS_DIR)
+  : { config: rawConfig, issues: [] };
+
+for (const issue of pluginIssues) fail("$.plugins", issue);
+
 validate(config);
+validateSemantics(config, process.cwd());
 
 if (errors.length > 0) {
   console.error(`Deploy configuration is invalid (${errors.length} issue(s)):`);

@@ -5,6 +5,19 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "project", "images", "compose"],
+  "definitions": {
+    "hookValue": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["script"],
+          "properties": { "script": { "type": "string", "minLength": 1 } }
+        }
+      ]
+    }
+  },
   "properties": {
     "version": { "const": 1 },
     "project": {
@@ -13,7 +26,13 @@
       "required": ["name"],
       "properties": {
         "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,48}$" },
-        "deployPath": { "type": "string", "pattern": "^/srv/stacks/[a-z0-9][a-z0-9/_.-]*$" }
+        "deployPath": { "type": "string", "pattern": "^/srv/stacks/[a-z0-9][a-z0-9/_.-]*$" },
+        "environmentLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Non-secret, human-readable label shown in observability output instead of any real infrastructure secret (e.g. 'homolog @ hetzner-1')."
+        }
       }
     },
     "images": {
@@ -106,8 +125,32 @@
       "if": { "properties": { "enabled": { "const": true } } },
       "then": { "required": ["engine", "composeService", "containerDatabase", "migration"] }
     },
+    "plugins": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+      "uniqueItems": true
+    },
+    "hooks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pre_build": { "$ref": "#/definitions/hookValue" },
+        "post_build": { "$ref": "#/definitions/hookValue" },
+        "pre_backup": { "$ref": "#/definitions/hookValue" },
+        "post_backup": { "$ref": "#/definitions/hookValue" },
+        "pre_migration": { "$ref": "#/definitions/hookValue" },
+        "post_migration": { "$ref": "#/definitions/hookValue" },
+        "pre_deploy": { "$ref": "#/definitions/hookValue" },
+        "post_deploy": { "$ref": "#/definitions/hookValue" },
+        "pre_healthcheck": { "$ref": "#/definitions/hookValue" },
+        "post_healthcheck": { "$ref": "#/definitions/hookValue" },
+        "pre_cleanup": { "$ref": "#/definitions/hookValue" },
+        "post_cleanup": { "$ref": "#/definitions/hookValue" }
+      }
+    },
     "healthChecks": {
       "type": "array",
+      "maxItems": 4,
       "items": {
         "type": "object",
         "additionalProperties": false,
