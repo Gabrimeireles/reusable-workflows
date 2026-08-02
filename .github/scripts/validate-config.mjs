@@ -25,7 +25,11 @@ const IMAGE_NAME_RE = /^[a-z][a-z0-9-]{1,63}$/;
 const SECRET_LABEL_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const ENV_FILENAME_RE = /^\.[a-zA-Z0-9._-]*[a-zA-Z0-9]$/;
 const COMPOSE_FILENAME_RE = /^[a-zA-Z0-9._-]+$/;
-const SECRET_LOOKING_KEY_RE = /(SECRET|TOKEN|PASSWORD|KEY)/i;
+// Deliberately does NOT match bare "KEY" — that would also reject genuinely public values whose
+// name ends in _KEY by convention (e.g. Stripe's VITE_STRIPE_PUBLISHABLE_KEY, a VAPID public
+// key). It matches the shapes that are actually secret: *_SECRET(_KEY)?, *_TOKEN, *_PASSWORD,
+// *_PRIVATE_KEY, *_API_KEY, *_ACCESS_KEY.
+const SECRET_LOOKING_KEY_RE = /SECRET|TOKEN|PASSWORD|PRIVATE_?KEY|API_?KEY|ACCESS_?KEY/i;
 const MAX_ENV_FILES = 6;
 const MAX_HEALTH_CHECKS = 4;
 const HOOK_NAMES = [
@@ -119,7 +123,7 @@ function validate(config) {
       if (img.buildArgs !== undefined) {
         if (!isPlainObject(img.buildArgs)) fail(`${p}.buildArgs`, "must be an object of string values");
         else for (const [k, v] of Object.entries(img.buildArgs)) {
-          if (SECRET_LOOKING_KEY_RE.test(k)) fail(`${p}.buildArgs.${k}`, "build arg keys must not look like a secret (SECRET/TOKEN/PASSWORD/KEY)");
+          if (SECRET_LOOKING_KEY_RE.test(k)) fail(`${p}.buildArgs.${k}`, "build arg keys must not look like a secret (matches SECRET/TOKEN/PASSWORD/PRIVATE_KEY/API_KEY/ACCESS_KEY)");
           if (typeof v !== "string") fail(`${p}.buildArgs.${k}`, "value must be a string");
         }
       }

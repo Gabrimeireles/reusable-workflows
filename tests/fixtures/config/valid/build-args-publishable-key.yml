@@ -1,0 +1,16 @@
+version: 1
+
+project:
+  name: sampleapp
+
+images:
+  - id: web
+    name: sampleapp-web
+    context: ./web
+    dockerfile: ./web/Dockerfile
+    buildArgs:
+      VITE_API_URL: "https://api.example.com"
+      VITE_STRIPE_PUBLISHABLE_KEY: "pk_live_not_a_secret"
+
+compose:
+  source: docker-compose.yml

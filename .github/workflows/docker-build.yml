@@ -146,11 +146,15 @@ jobs:
             echo "::error::jq is required on the runner"
             exit 1
           fi
-          BAD_KEYS=$(jq -r 'keys[] | select(test("SECRET|TOKEN|PASSWORD|KEY";"i"))' <<< "$BUILD_ARGS_JSON" || true)
+          # Deliberately does not match bare "KEY" — see .github/scripts/validate-config.mjs's
+          # SECRET_LOOKING_KEY_RE comment: that would also reject genuinely public values whose
+          # name ends in _KEY by convention (e.g. VITE_STRIPE_PUBLISHABLE_KEY).
+          BAD_KEYS=$(jq -r 'keys[] | select(test("SECRET|TOKEN|PASSWORD|PRIVATE_?KEY|API_?KEY|ACCESS_?KEY";"i"))' <<< "$BUILD_ARGS_JSON" || true)
           if [ -n "$BAD_KEYS" ]; then
-            echo "::error::build_args keys must not look like a secret (SECRET/TOKEN/PASSWORD/KEY): $BAD_KEYS"
+            echo "::error::build_args keys must not look like a secret (matches SECRET/TOKEN/PASSWORD/PRIVATE_KEY/API_KEY/ACCESS_KEY): $BAD_KEYS"
             exit 1
           fi
+
           {
             echo "rendered<<__BUILD_ARGS_EOF__"
             jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$BUILD_ARGS_JSON"
