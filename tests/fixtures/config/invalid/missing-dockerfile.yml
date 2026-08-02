@@ -1,0 +1,13 @@
+version: 1
+
+project:
+  name: sampleapp
+
+images:
+  - id: app
+    name: sampleapp
+    context: .
+    dockerfile: ./Dockerfile.does-not-exist
+
+compose:
+  source: docker-compose.yml

@@ -1,0 +1,59 @@
+version: 1
+
+project:
+  name: pricely
+  deployPath: /srv/stacks/pricely
+
+images:
+  - id: backend
+    name: pricely-backend
+    context: ./backend
+    dockerfile: ./backend/Dockerfile
+  - id: web
+    name: pricely-web
+    context: ./web
+    dockerfile: ./web/Dockerfile
+
+compose:
+  source: docker-compose.homolog.yml
+  destination: docker-compose.yml
+  dependencyServices: [postgres, redis, pgadmin]
+  applicationServices: [backend, web]
+
+environmentFiles:
+  - secret: BACKEND_ENV_FILE
+    destination: .env.backend
+    required: true
+  - secret: WEB_ENV_FILE
+    destination: .env.web
+    required: false
+
+database:
+  enabled: true
+  engine: postgres
+  composeService: postgres
+  containerDatabase: pricely
+  containerUser: postgres
+  backup:
+    enabled: true
+    retentionDays: 14
+  migration:
+    service: backend
+    command: "npm run db:generate && npm run db:migrate:deploy:safe"
+  reset:
+    command: "npm run db:generate && npm run db:migrate:reset"
+  seed:
+    command: "npm run db:seed"
+
+healthChecks:
+  - name: web-internal
+    type: compose
+    service: web
+    command: "test -f /usr/share/nginx/html/index.html && wget -qO- http://127.0.0.1:5173"
+    retries: 30
+    intervalSeconds: 5
+  - name: public
+    type: http
+    url: https://pricely.grmeireles.dev
+    retries: 20
+    intervalSeconds: 10

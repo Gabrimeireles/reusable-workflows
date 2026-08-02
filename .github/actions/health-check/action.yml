@@ -1,0 +1,125 @@
+name: "Health check"
+description: >-
+  Runs one health check, either an HTTP request from the runner or a command inside a named
+  Compose service on the remote host, with retries/interval, printing logs on failure.
+inputs:
+  name: { required: true }
+  type:
+    description: "http | compose"
+    required: true
+  url: { required: false, default: "" }
+  deploy_user: { required: false, default: "" }
+  deploy_host: { required: false, default: "" }
+  deploy_path: { required: false, default: "" }
+  compose_filename: { required: false, default: "docker-compose.yml" }
+  service: { required: false, default: "" }
+  command: { required: false, default: "" }
+  retries: { required: false, default: "10" }
+  interval_seconds: { required: false, default: "10" }
+outputs:
+  outcome:
+    description: "success | failure"
+    value: ${{ steps.check.outputs.outcome }}
+  attempts_used:
+    description: "How many attempts it took (for the release manifest / summary)"
+    value: ${{ steps.check.outputs.attempts_used }}
+runs:
+  using: "composite"
+  steps:
+    - id: check
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        TYPE: ${{ inputs.type }}
+        URL: ${{ inputs.url }}
+        DEPLOY_USER: ${{ inputs.deploy_user }}
+        DEPLOY_HOST: ${{ inputs.deploy_host }}
+        DEPLOY_PATH: ${{ inputs.deploy_path }}
+        COMPOSE_FILENAME: ${{ inputs.compose_filename }}
+        SERVICE: ${{ inputs.service }}
+        COMMAND: ${{ inputs.command }}
+        RETRIES: ${{ inputs.retries }}
+        INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
+      run: |
+        set -euo pipefail
+
+        if [ "$TYPE" = "http" ]; then
+          if [ -z "$URL" ]; then
+            echo "::error::Health check '$NAME' is type=http but no url was configured"
+            exit 1
+          fi
+          for attempt in $(seq 1 "$RETRIES"); do
+            STATUS_CODE=$(curl -sS -L --connect-timeout 5 --max-time 15 -o /tmp/health-body -w '%{http_code}' "$URL" || true)
+            if echo "$STATUS_CODE" | grep -q '^2[0-9][0-9]$'; then
+              echo "Health check '$NAME' passed (HTTP $STATUS_CODE, attempt $attempt/$RETRIES)"
+              {
+                echo "outcome=success"
+                echo "attempts_used=$attempt"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            [ "$attempt" -lt "$RETRIES" ] && sleep "$INTERVAL_SECONDS"
+          done
+          echo "::error::Health check '$NAME' failed after $RETRIES attempts"
+          cat /tmp/health-body 2>/dev/null || true
+          {
+            echo "outcome=failure"
+            echo "attempts_used=$RETRIES"
+          } >> "$GITHUB_OUTPUT"
+          exit 1
+
+        elif [ "$TYPE" = "compose" ]; then
+          if [ -z "$SERVICE" ] || [ -z "$COMMAND" ]; then
+            echo "::error::Health check '$NAME' is type=compose but service/command is missing"
+            exit 1
+          fi
+
+          set +e
+          {
+            printf 'DEPLOY_PATH=%q\n' "$DEPLOY_PATH"
+            printf 'COMPOSE_FILENAME=%q\n' "$COMPOSE_FILENAME"
+            printf 'SERVICE=%q\n' "$SERVICE"
+            printf 'COMMAND=%q\n' "$COMMAND"
+            printf 'RETRIES=%q\n' "$RETRIES"
+            printf 'INTERVAL_SECONDS=%q\n' "$INTERVAL_SECONDS"
+            cat <<'REMOTE_SCRIPT'
+        set -euo pipefail
+        cd "$DEPLOY_PATH"
+        for attempt in $(seq 1 "$RETRIES"); do
+          if docker compose --env-file .env -f "$COMPOSE_FILENAME" exec -T "$SERVICE" sh -lc "$COMMAND" </dev/null; then
+            echo "ATTEMPTS_USED=$attempt"
+            exit 0
+          fi
+          if [ "$attempt" -eq "$RETRIES" ]; then
+            echo "Health check command did not succeed after $RETRIES attempts" >&2
+            docker compose --env-file .env -f "$COMPOSE_FILENAME" logs --tail=120 "$SERVICE" || true
+            echo "ATTEMPTS_USED=$RETRIES"
+            exit 1
+          fi
+          sleep "$INTERVAL_SECONDS"
+        done
+        REMOTE_SCRIPT
+          } | ssh "$DEPLOY_USER@$DEPLOY_HOST" "bash -s" | tee /tmp/health-check-remote.log
+          STATUS=$?
+          set -e
+
+          ATTEMPTS=$(grep '^ATTEMPTS_USED=' /tmp/health-check-remote.log | tail -1 | cut -d= -f2)
+
+          if [ "$STATUS" -eq 0 ]; then
+            echo "Health check '$NAME' passed"
+            {
+              echo "outcome=success"
+              echo "attempts_used=${ATTEMPTS:-1}"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Health check '$NAME' failed"
+            {
+              echo "outcome=failure"
+              echo "attempts_used=${ATTEMPTS:-$RETRIES}"
+            } >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+        else
+          echo "::error::Unknown health check type '$TYPE' for '$NAME'"
+          exit 1
+        fi

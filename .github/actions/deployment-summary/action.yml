@@ -1,0 +1,83 @@
+name: "Deployment summary"
+description: >-
+  Renders a $GITHUB_STEP_SUMMARY entry from the release manifest (Constitution Principle
+  XI/XVII, ADR 0010) — the manifest is the source of truth; this action only formats it. Never
+  computes anything independently, so the summary and the manifest can never disagree.
+inputs:
+  manifest_json:
+    description: "The manifest JSON produced by .github/actions/release-manifest"
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      env:
+        MANIFEST_JSON: ${{ inputs.manifest_json }}
+      run: |
+        set -euo pipefail
+        m() { jq -r "$1" <<< "$MANIFEST_JSON"; }
+
+        {
+          echo "## Deploy summary: $(m '.project') ($(m '.environment'))$(
+            LABEL=$(m '.environmentLabel // ""')
+            [ -n "$LABEL" ] && printf ' — %s' "$LABEL"
+          )"
+          echo
+          echo "**Status**: $(m '.overallStatus') &nbsp;·&nbsp; **Duration**: $(m '.durationSeconds')s"
+          echo "**Commit**: \`$(m '.git.commit')\` on \`$(m '.git.branch')\` by $(m '.git.actor')"
+          echo
+
+          echo "### Images"
+          echo '| Image | Ref | Digest | Size |'
+          echo '|---|---|---|---|'
+          jq -r '.images | to_entries[] | "| \(.key) | \(.value.ref) | \(.value.digest // "n/a") | \(if .value.sizeBytes then (.value.sizeBytes / 1048576 | floor | tostring) + " MiB" else "n/a" end) |"' <<< "$MANIFEST_JSON"
+          echo
+
+          if [ "$(m '.previousImages // ""')" != "" ]; then
+            echo "Previous server state (for manual rollback, see docs/rollback.md):"
+            echo '```'
+            m '.previousImages'
+            echo '```'
+            echo
+          fi
+
+          echo "### Timings"
+          TIMING_COUNT=$(jq '.timings // {} | length' <<< "$MANIFEST_JSON")
+          if [ "$TIMING_COUNT" -gt 0 ]; then
+            echo '| Phase | Seconds |'
+            echo '|---|---|'
+            jq -r '.timings // {} | to_entries[] | "| \(.key) | \(.value) |"' <<< "$MANIFEST_JSON"
+            echo
+          fi
+
+          echo "### Database"
+          echo "- Migration ran: $(m '.database.migrationRan // false')"
+          RESET=$(m '.database.resetRan // false')
+          echo "- Reset ran: $RESET$( [ "$RESET" = "true" ] && echo ' ⚠️ DESTRUCTIVE OPERATION' )"
+          echo "- Seed ran: $(m '.database.seedRan // false')"
+          BACKUP=$(m '.database.backupFile // ""')
+          if [ -n "$BACKUP" ] && [ "$BACKUP" != "null" ]; then
+            echo "- Pre-deploy backup: \`$BACKUP\` (kept for manual rollback)"
+          fi
+          echo
+
+          echo "### Health checks"
+          HC_COUNT=$(jq '.healthChecks // [] | length' <<< "$MANIFEST_JSON")
+          if [ "$HC_COUNT" -gt 0 ]; then
+            echo '| Check | Outcome | Attempts |'
+            echo '|---|---|---|'
+            jq -r '.healthChecks[] | "| \(.name) | \(.outcome) | \(.attempts // "n/a") |"' <<< "$MANIFEST_JSON"
+          else
+            echo "_No health checks configured._"
+          fi
+          echo
+
+          echo "### Rollback"
+          echo "If this deploy needs reverting, run on the server (see docs/rollback.md):"
+          echo '```sh'
+          m '.rollbackCommand'
+          echo '```'
+
+          echo
+          echo "_Full manifest: \`release-manifest.json\` on the server, and attached as a workflow artifact._"
+        } >> "$GITHUB_STEP_SUMMARY"

@@ -103,7 +103,7 @@ jobs:
 
       - name: Connect to Tailscale
         if: ${{ inputs.use_tailscale }}
-        uses: tailscale/github-action@v4
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
@@ -130,7 +130,7 @@ jobs:
           [ -f "${{ inputs.compose_file }}" ] || { echo "Missing compose file: ${{ inputs.compose_file }}"; exit 1; }
 
       - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.10.0
+        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
         with:
           ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
 
@@ -252,7 +252,7 @@ jobs:
         if: env.DISCORD_WEBHOOK_URL != ''
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        uses: sarisia/actions-status-discord@v1
+        uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1
         with:
           webhook: ${{ env.DISCORD_WEBHOOK_URL }}
           status: ${{ steps.status.outputs.status }}

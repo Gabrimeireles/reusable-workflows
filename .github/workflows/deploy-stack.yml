@@ -1,0 +1,702 @@
+name: Reusable - Deploy Stack
+
+on:
+  workflow_call:
+    inputs:
+      project_name:
+        description: "Project identifier, e.g. myapp"
+        required: true
+        type: string
+      environment_name:
+        description: "Environment label, e.g. homolog"
+        required: true
+        type: string
+      deploy_path:
+        description: "Override for the remote deploy path (must resolve under base_dir)"
+        required: false
+        type: string
+        default: ""
+      base_dir:
+        description: "Base directory all deploy paths must live under"
+        required: false
+        type: string
+        default: "/srv/stacks"
+      configuration_file:
+        description: "Path to the declarative deploy config; defaults to .github/deploy/<environment_name>.yml"
+        required: false
+        type: string
+        default: ""
+      image_refs:
+        description: >-
+          JSON map of imageId -> full image reference including tag, e.g.
+          {"backend":"ghcr.io/owner/myapp-backend:sha-abc1234"}. All images in one deploy must
+          share the same tag.
+        required: true
+        type: string
+      image_details:
+        description: >-
+          Optional JSON map of imageId -> {ref, digest, size}, for the release manifest. Only
+          populated when built via ci-cd.yml's matrix; empty ({}) is fine for direct
+          docker-build.yml callers — the manifest just omits digest/size in that case.
+        required: false
+        type: string
+        default: "{}"
+      reset_database:
+        description: "Drop/recreate the database before deploy. Only allowed on workflow_dispatch."
+        required: false
+        type: boolean
+        default: false
+      run_seeders:
+        description: "Run the configured seed command after migration/reset."
+        required: false
+        type: boolean
+        default: false
+      use_tailscale:
+        description: "Connect to Tailscale before SSH."
+        required: false
+        type: boolean
+        default: true
+      health_url_override:
+        description: "Override URL for the first http-type health check, if any."
+        required: false
+        type: string
+        default: ""
+    secrets:
+      DEPLOY_HOST:
+        required: false
+      DEPLOY_USER:
+        required: false
+      DEPLOY_SSH_KEY:
+        required: false
+      GHCR_PAT:
+        required: false
+      TS_OAUTH_CLIENT_ID:
+        required: false
+      TS_OAUTH_SECRET:
+        required: false
+      COMPOSE_ENV_EXTRA:
+        description: >-
+          Full contents of every Compose .env variable the platform doesn't derive itself
+          (database password, ports, urls, ...) — entirely caller-owned (Principle IX).
+        required: false
+      ENV_FILE_1: { required: false }
+      ENV_FILE_2: { required: false }
+      ENV_FILE_3: { required: false }
+      ENV_FILE_4: { required: false }
+      ENV_FILE_5: { required: false }
+      ENV_FILE_6: { required: false }
+    outputs:
+      health_status:
+        description: "success | failure | skipped"
+        value: ${{ jobs.deploy.outputs.health_status }}
+      deployment_time_seconds:
+        value: ${{ jobs.deploy.outputs.deployment_time_seconds }}
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-${{ inputs.project_name }}-${{ inputs.environment_name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.project_name }}/${{ inputs.environment_name }}
+    runs-on: ubuntu-latest
+    outputs:
+      health_status: ${{ steps.health.outputs.status }}
+      deployment_time_seconds: ${{ steps.timer.outputs.elapsed }}
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Start timer
+        id: timer_start
+        shell: bash
+        run: echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve project
+        id: project
+        uses: ./.github/actions/resolve-project
+        with:
+          project_name: ${{ inputs.project_name }}
+          environment_name: ${{ inputs.environment_name }}
+          deploy_path_override: ${{ inputs.deploy_path }}
+          base_dir: ${{ inputs.base_dir }}
+
+      - name: Determine configuration file path
+        id: config_path
+        shell: bash
+        env:
+          CONFIGURATION_FILE: ${{ inputs.configuration_file }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CONFIGURATION_FILE" ]; then
+            echo "path=$CONFIGURATION_FILE" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=.github/deploy/${ENVIRONMENT_NAME}.yml" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Load config
+        id: config
+        uses: ./.github/actions/load-config
+        with:
+          configuration_file: ${{ steps.config_path.outputs.path }}
+
+      - name: Reset guard (Principle VII)
+        shell: bash
+        env:
+          RESET_DATABASE: ${{ inputs.reset_database }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$RESET_DATABASE" = "true" ] && [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "::error::reset_database=true is only allowed on a workflow_dispatch run (got event '$EVENT_NAME'). Refusing to proceed."
+            exit 1
+          fi
+          if [ "$RESET_DATABASE" = "true" ]; then
+            echo "::warning::DESTRUCTIVE OPERATION requested: the database will be reset (dropped and recreated) after a verified backup."
+          fi
+
+      - name: Resolve config-derived values
+        id: resolve
+        shell: bash
+        env:
+          CONFIG: ${{ steps.config.outputs.config }}
+          IMAGE_REFS: ${{ inputs.image_refs }}
+          HEALTH_URL_OVERRIDE: ${{ inputs.health_url_override }}
+        run: |
+          set -euo pipefail
+
+          jqout() { jq -r "$1" <<< "$CONFIG"; }
+
+          {
+            echo "compose_source=$(jqout '.compose.source')"
+            echo "compose_destination=$(jqout '.compose.destination // "docker-compose.yml"')"
+            echo "dependency_services=$(jqout '(.compose.dependencyServices // []) | join(" ")')"
+            APP_SERVICES=$(jqout '(.compose.applicationServices // [.images[].id]) | join(" ")')
+            echo "application_services=$APP_SERVICES"
+
+            DB_ENABLED=$(jqout '.database.enabled // false')
+            echo "db_enabled=$DB_ENABLED"
+            echo "db_compose_service=$(jqout '.database.composeService // ""')"
+            echo "db_container_database=$(jqout '.database.containerDatabase // ""')"
+            echo "db_container_user=$(jqout '.database.containerUser // "postgres"')"
+            echo "db_backup_enabled=$(jqout '(.database.backup.enabled // true)')"
+            echo "db_retention_days=$(jqout '(.database.backup.retentionDays // 14)')"
+            echo "db_migration_service=$(jqout '.database.migration.service // ""')"
+            echo "db_reset_command=$(jqout '.database.reset.command // ""')"
+            echo "db_seed_command=$(jqout '.database.seed.command // ""')"
+
+            for i in 1 2 3 4 5 6; do
+              idx=$((i - 1))
+              echo "env_file_${i}_destination=$(jqout ".environmentFiles[$idx].destination // \"\"")"
+              echo "env_file_${i}_required=$(jqout "(.environmentFiles[$idx].required // true)")"
+            done
+
+            for i in 1 2 3 4; do
+              idx=$((i - 1))
+              echo "hc_${i}_name=$(jqout ".healthChecks[$idx].name // \"\"")"
+              echo "hc_${i}_type=$(jqout ".healthChecks[$idx].type // \"\"")"
+              hc_url=$(jqout ".healthChecks[$idx].url // \"\"")
+              if [ "$i" = "1" ] && [ -n "$HEALTH_URL_OVERRIDE" ] && [ "$hc_url" != "" ]; then
+                hc_url="$HEALTH_URL_OVERRIDE"
+              fi
+              echo "hc_${i}_url=$hc_url"
+              echo "hc_${i}_service=$(jqout ".healthChecks[$idx].service // \"\"")"
+              echo "hc_${i}_command=$(jqout ".healthChecks[$idx].command // \"\"")"
+              echo "hc_${i}_retries=$(jqout "(.healthChecks[$idx].retries // 10)")"
+              echo "hc_${i}_interval=$(jqout "(.healthChecks[$idx].intervalSeconds // 10)")"
+            done
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            # Migration command is always read (never used for reset)
+            echo "db_migration_command=$(jqout '.database.migration.command // ""')"
+            # Non-secret display label for observability (Principle III — never the real host)
+            echo "environment_label=$(jqout '.project.environmentLabel // ""')"
+          } >> "$GITHUB_OUTPUT"
+
+          # Resolve every remote lifecycle hook (docs/adr/0009-hooks.md) to one final command
+          # string. pre_build/post_build are resolved by ci-cd.yml's own load job instead (they
+          # run on the runner, before this workflow is even called) — resolving them here too is
+          # harmless but unused when deploy-stack.yml is called directly (Pricely's draft).
+          for hook in pre_build post_build pre_backup post_backup pre_migration post_migration \
+                      pre_deploy post_deploy pre_healthcheck post_healthcheck pre_cleanup post_cleanup; do
+            echo "hook_${hook}=$(jqout ".hooks.${hook} // \"\" | if type == \"object\" then \"bash \" + .script else . end")" >> "$GITHUB_OUTPUT"
+          done
+
+          if [ "$(jq '(.images // []) | length' <<< "$CONFIG")" -lt 1 ]; then
+            echo "::error::config has no images defined"
+            exit 1
+          fi
+
+          # Derive compose .env IMAGE_* lines + shared IMAGE_TAG from image_refs, validating a
+          # single shared tag across all images in this deploy (Principle V/VI assumption).
+          TAGS=$(jq -r 'to_entries[] | (.value | split(":") | last)' <<< "$IMAGE_REFS" | sort -u)
+          if [ "$(echo "$TAGS" | wc -l)" -ne 1 ]; then
+            echo "::error::image_refs contains more than one distinct tag; all images in a deploy must share one immutable tag. Got: $TAGS"
+            exit 1
+          fi
+          echo "image_tag=$TAGS" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "image_env_lines<<__IMAGE_ENV_EOF__"
+            jq -r 'to_entries[] | "\(.key | ascii_upcase)_IMAGE=\(.value | split(":") | .[:-1] | join(":"))"' <<< "$IMAGE_REFS"
+            printf 'IMAGE_TAG=%s\n' "$TAGS"
+            echo "__IMAGE_ENV_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Setup network
+        uses: ./.github/actions/setup-network
+        with:
+          enabled: ${{ inputs.use_tailscale }}
+          oauth_client_id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth_secret: ${{ secrets.TS_OAUTH_SECRET }}
+
+      - name: Setup SSH
+        uses: ./.github/actions/setup-ssh
+        with:
+          ssh_private_key: ${{ secrets.DEPLOY_SSH_KEY }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+
+      - id: t_ssh_ready
+        shell: bash
+        run: echo "t=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: "Hook: pre_deploy"
+        if: steps.resolve.outputs.hook_pre_deploy != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:pre_deploy"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_pre_deploy }}
+
+      - name: Snapshot previous server state
+        id: snapshot
+        uses: ./.github/actions/deploy-compose
+        with:
+          stage: snapshot
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+
+      - name: Prepare deploy files
+        id: prepare
+        uses: ./.github/actions/prepare-deploy-files
+        with:
+          compose_source_path: ${{ steps.resolve.outputs.compose_source }}
+          compose_destination_name: ${{ steps.resolve.outputs.compose_destination }}
+          dotenv_contents: |
+            ${{ steps.resolve.outputs.image_env_lines }}
+            ${{ secrets.COMPOSE_ENV_EXTRA }}
+          env_file_1_contents: ${{ secrets.ENV_FILE_1 }}
+          env_file_1_destination: ${{ steps.resolve.outputs.env_file_1_destination }}
+          env_file_1_required: ${{ steps.resolve.outputs.env_file_1_required }}
+          env_file_2_contents: ${{ secrets.ENV_FILE_2 }}
+          env_file_2_destination: ${{ steps.resolve.outputs.env_file_2_destination }}
+          env_file_2_required: ${{ steps.resolve.outputs.env_file_2_required }}
+          env_file_3_contents: ${{ secrets.ENV_FILE_3 }}
+          env_file_3_destination: ${{ steps.resolve.outputs.env_file_3_destination }}
+          env_file_3_required: ${{ steps.resolve.outputs.env_file_3_required }}
+          env_file_4_contents: ${{ secrets.ENV_FILE_4 }}
+          env_file_4_destination: ${{ steps.resolve.outputs.env_file_4_destination }}
+          env_file_4_required: ${{ steps.resolve.outputs.env_file_4_required }}
+          env_file_5_contents: ${{ secrets.ENV_FILE_5 }}
+          env_file_5_destination: ${{ steps.resolve.outputs.env_file_5_destination }}
+          env_file_5_required: ${{ steps.resolve.outputs.env_file_5_required }}
+          env_file_6_contents: ${{ secrets.ENV_FILE_6 }}
+          env_file_6_destination: ${{ steps.resolve.outputs.env_file_6_destination }}
+          env_file_6_required: ${{ steps.resolve.outputs.env_file_6_required }}
+
+      - name: Upload deploy files
+        uses: ./.github/actions/upload-deploy-files
+        with:
+          local_dir: ${{ steps.prepare.outputs.local_dir }}
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+
+      - id: t_uploaded
+        shell: bash
+        run: echo "t=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Start dependency services
+        uses: ./.github/actions/deploy-compose
+        with:
+          stage: start
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          ghcr_pat: ${{ secrets.GHCR_PAT }}
+          github_repository_owner: ${{ github.repository_owner }}
+          dependency_services: ${{ steps.resolve.outputs.dependency_services }}
+
+      - name: "Hook: pre_backup"
+        if: steps.resolve.outputs.db_enabled == 'true' && steps.resolve.outputs.hook_pre_backup != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:pre_backup"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_pre_backup }}
+
+      - name: Backup database
+        id: backup
+        if: steps.resolve.outputs.db_enabled == 'true'
+        uses: ./.github/actions/backup-postgres
+        with:
+          enabled: ${{ steps.resolve.outputs.db_backup_enabled }}
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          compose_service: ${{ steps.resolve.outputs.db_compose_service }}
+          container_database: ${{ steps.resolve.outputs.db_container_database }}
+          container_user: ${{ steps.resolve.outputs.db_container_user }}
+          retention_days: ${{ steps.resolve.outputs.db_retention_days }}
+          deploy_tag: ${{ steps.resolve.outputs.image_tag }}
+
+      - id: t_backed_up
+        if: always()
+        shell: bash
+        run: echo "t=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: "Hook: post_backup"
+        if: steps.resolve.outputs.db_enabled == 'true' && steps.resolve.outputs.hook_post_backup != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:post_backup"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_post_backup }}
+
+      - name: "Hook: pre_migration"
+        if: steps.resolve.outputs.db_enabled == 'true' && steps.resolve.outputs.hook_pre_migration != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:pre_migration"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_pre_migration }}
+
+      - name: Run database reset
+        id: reset
+        if: steps.resolve.outputs.db_enabled == 'true' && inputs.reset_database == true
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "reset (DESTRUCTIVE)"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          service: ${{ steps.resolve.outputs.db_migration_service }}
+          command: ${{ steps.resolve.outputs.db_reset_command }}
+
+      - name: Run database migration
+        id: migration
+        if: steps.resolve.outputs.db_enabled == 'true' && inputs.reset_database == false
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "migration"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          service: ${{ steps.resolve.outputs.db_migration_service }}
+          command: ${{ steps.resolve.outputs.db_migration_command }}
+
+      - name: "Hook: post_migration"
+        if: steps.resolve.outputs.db_enabled == 'true' && steps.resolve.outputs.hook_post_migration != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:post_migration"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_post_migration }}
+
+      - name: Run database seed
+        id: seed
+        if: steps.resolve.outputs.db_enabled == 'true' && inputs.run_seeders == true
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "seed"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          service: ${{ steps.resolve.outputs.db_migration_service }}
+          command: ${{ steps.resolve.outputs.db_seed_command }}
+
+      - id: t_migrated
+        if: always()
+        shell: bash
+        run: echo "t=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Recreate application services
+        uses: ./.github/actions/deploy-compose
+        with:
+          stage: recreate
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          application_services: ${{ steps.resolve.outputs.application_services }}
+
+      - id: t_recreated
+        if: always()
+        shell: bash
+        run: echo "t=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: "Hook: post_deploy"
+        if: steps.resolve.outputs.hook_post_deploy != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:post_deploy"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_post_deploy }}
+
+      - name: "Hook: pre_healthcheck"
+        if: steps.resolve.outputs.hook_pre_healthcheck != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:pre_healthcheck"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_pre_healthcheck }}
+
+      - name: Health check 1
+        id: hc1
+        if: steps.resolve.outputs.hc_1_name != ''
+        uses: ./.github/actions/health-check
+        with:
+          name: ${{ steps.resolve.outputs.hc_1_name }}
+          type: ${{ steps.resolve.outputs.hc_1_type }}
+          url: ${{ steps.resolve.outputs.hc_1_url }}
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          service: ${{ steps.resolve.outputs.hc_1_service }}
+          command: ${{ steps.resolve.outputs.hc_1_command }}
+          retries: ${{ steps.resolve.outputs.hc_1_retries }}
+          interval_seconds: ${{ steps.resolve.outputs.hc_1_interval }}
+
+      - name: Health check 2
+        id: hc2
+        if: steps.resolve.outputs.hc_2_name != ''
+        uses: ./.github/actions/health-check
+        with:
+          name: ${{ steps.resolve.outputs.hc_2_name }}
+          type: ${{ steps.resolve.outputs.hc_2_type }}
+          url: ${{ steps.resolve.outputs.hc_2_url }}
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          service: ${{ steps.resolve.outputs.hc_2_service }}
+          command: ${{ steps.resolve.outputs.hc_2_command }}
+          retries: ${{ steps.resolve.outputs.hc_2_retries }}
+          interval_seconds: ${{ steps.resolve.outputs.hc_2_interval }}
+
+      - name: Health check 3
+        id: hc3
+        if: steps.resolve.outputs.hc_3_name != ''
+        uses: ./.github/actions/health-check
+        with:
+          name: ${{ steps.resolve.outputs.hc_3_name }}
+          type: ${{ steps.resolve.outputs.hc_3_type }}
+          url: ${{ steps.resolve.outputs.hc_3_url }}
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          service: ${{ steps.resolve.outputs.hc_3_service }}
+          command: ${{ steps.resolve.outputs.hc_3_command }}
+          retries: ${{ steps.resolve.outputs.hc_3_retries }}
+          interval_seconds: ${{ steps.resolve.outputs.hc_3_interval }}
+
+      - name: Health check 4
+        id: hc4
+        if: steps.resolve.outputs.hc_4_name != ''
+        uses: ./.github/actions/health-check
+        with:
+          name: ${{ steps.resolve.outputs.hc_4_name }}
+          type: ${{ steps.resolve.outputs.hc_4_type }}
+          url: ${{ steps.resolve.outputs.hc_4_url }}
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          service: ${{ steps.resolve.outputs.hc_4_service }}
+          command: ${{ steps.resolve.outputs.hc_4_command }}
+          retries: ${{ steps.resolve.outputs.hc_4_retries }}
+          interval_seconds: ${{ steps.resolve.outputs.hc_4_interval }}
+
+      - name: "Hook: post_healthcheck"
+        if: always() && steps.resolve.outputs.hook_post_healthcheck != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:post_healthcheck"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_post_healthcheck }}
+
+      - id: t_healthchecked
+        if: always()
+        shell: bash
+        run: echo "t=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: "Hook: pre_cleanup"
+        if: always() && steps.resolve.outputs.hook_pre_cleanup != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:pre_cleanup"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_pre_cleanup }}
+
+      - name: Cleanup (prune dangling images)
+        if: always()
+        uses: ./.github/actions/deploy-compose
+        with:
+          stage: cleanup
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+
+      - name: "Hook: post_cleanup"
+        if: always() && steps.resolve.outputs.hook_post_cleanup != ''
+        uses: ./.github/actions/run-remote-command
+        with:
+          label: "hook:post_cleanup"
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          command: ${{ steps.resolve.outputs.hook_post_cleanup }}
+
+      - name: Stop timer
+        id: timer
+        if: always()
+        shell: bash
+        env:
+          START: ${{ steps.timer_start.outputs.start }}
+        run: echo "elapsed=$(( $(date +%s) - START ))" >> "$GITHUB_OUTPUT"
+
+      - name: Compute health status
+        id: health
+        if: always()
+        shell: bash
+        env:
+          O1: ${{ steps.hc1.outputs.outcome }}
+          O2: ${{ steps.hc2.outputs.outcome }}
+          O3: ${{ steps.hc3.outputs.outcome }}
+          O4: ${{ steps.hc4.outputs.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$O1" = "failure" ] || [ "$O2" = "failure" ] || [ "$O3" = "failure" ] || [ "$O4" = "failure" ]; then
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+          elif [ -z "$O1$O2$O3$O4" ]; then
+            echo "status=skipped" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute phase timings
+        id: timings
+        if: always()
+        shell: bash
+        env:
+          T_SSH_READY: ${{ steps.t_ssh_ready.outputs.t }}
+          T_UPLOADED: ${{ steps.t_uploaded.outputs.t }}
+          T_BACKED_UP: ${{ steps.t_backed_up.outputs.t }}
+          T_MIGRATED: ${{ steps.t_migrated.outputs.t }}
+          T_RECREATED: ${{ steps.t_recreated.outputs.t }}
+          T_HEALTHCHECKED: ${{ steps.t_healthchecked.outputs.t }}
+        run: |
+          set -euo pipefail
+          diff_or_null() {
+            local a="$1" b="$2"
+            if [ -n "$a" ] && [ -n "$b" ]; then echo "$((b - a))"; else echo "null"; fi
+          }
+          UPLOAD=$(diff_or_null "$T_SSH_READY" "$T_UPLOADED")
+          BACKUP=$(diff_or_null "$T_UPLOADED" "$T_BACKED_UP")
+          MIGRATION=$(diff_or_null "$T_BACKED_UP" "$T_MIGRATED")
+          DEPLOY=$(diff_or_null "$T_MIGRATED" "$T_RECREATED")
+          HEALTHCHECK=$(diff_or_null "$T_RECREATED" "$T_HEALTHCHECKED")
+          echo "json={\"upload\":$UPLOAD,\"backup\":$BACKUP,\"migration\":$MIGRATION,\"deploy\":$DEPLOY,\"healthcheck\":$HEALTHCHECK}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release manifest
+        id: manifest
+        if: always()
+        uses: ./.github/actions/release-manifest
+        with:
+          project_name: ${{ inputs.project_name }}
+          environment_name: ${{ inputs.environment_name }}
+          environment_label: ${{ steps.resolve.outputs.environment_label }}
+          deploy_user: ${{ secrets.DEPLOY_USER }}
+          deploy_host: ${{ secrets.DEPLOY_HOST }}
+          deploy_path: ${{ steps.project.outputs.deploy_path }}
+          compose_filename: ${{ steps.resolve.outputs.compose_destination }}
+          image_refs_json: ${{ inputs.image_refs }}
+          image_details_json: ${{ inputs.image_details }}
+          previous_image_lines: ${{ steps.snapshot.outputs.previous_image_lines }}
+          compose_checksum: ${{ steps.prepare.outputs.compose_checksum }}
+          env_checksum: ${{ steps.prepare.outputs.env_checksum }}
+          backup_file: ${{ steps.backup.outputs.backup_file }}
+          migration_ran: ${{ steps.migration.outcome == 'success' }}
+          reset_ran: ${{ steps.reset.outcome == 'success' }}
+          seed_ran: ${{ steps.seed.outcome == 'success' }}
+          health_results_json: >-
+            [
+              {"name": "${{ steps.resolve.outputs.hc_1_name }}", "outcome": "${{ steps.hc1.outputs.outcome }}", "attempts": "${{ steps.hc1.outputs.attempts_used }}"},
+              {"name": "${{ steps.resolve.outputs.hc_2_name }}", "outcome": "${{ steps.hc2.outputs.outcome }}", "attempts": "${{ steps.hc2.outputs.attempts_used }}"},
+              {"name": "${{ steps.resolve.outputs.hc_3_name }}", "outcome": "${{ steps.hc3.outputs.outcome }}", "attempts": "${{ steps.hc3.outputs.attempts_used }}"},
+              {"name": "${{ steps.resolve.outputs.hc_4_name }}", "outcome": "${{ steps.hc4.outputs.outcome }}", "attempts": "${{ steps.hc4.outputs.attempts_used }}"}
+            ]
+          timings_json: ${{ steps.timings.outputs.json }}
+          overall_status: ${{ job.status }}
+          duration_seconds: ${{ steps.timer.outputs.elapsed }}
+
+      - name: Upload release manifest artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest-${{ inputs.project_name }}-${{ inputs.environment_name }}
+          path: ${{ steps.manifest.outputs.manifest_path }}
+          retention-days: 90
+
+      - name: Deployment summary
+        id: summary
+        if: always()
+        uses: ./.github/actions/deployment-summary
+        with:
+          manifest_json: ${{ steps.manifest.outputs.manifest_json }}

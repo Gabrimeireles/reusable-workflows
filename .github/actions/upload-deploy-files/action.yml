@@ -1,0 +1,34 @@
+name: "Upload deploy files"
+description: "Uploads the rendered deploy files to the remote host and shreds the local copy."
+inputs:
+  local_dir:
+    description: "Local directory produced by prepare-deploy-files"
+    required: true
+  deploy_user:
+    required: true
+  deploy_host:
+    required: true
+  deploy_path:
+    description: "Validated remote deploy path (from resolve-project)"
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      env:
+        LOCAL_DIR: ${{ inputs.local_dir }}
+        DEPLOY_USER: ${{ inputs.deploy_user }}
+        DEPLOY_HOST: ${{ inputs.deploy_host }}
+        DEPLOY_PATH: ${{ inputs.deploy_path }}
+      run: |
+        set -euo pipefail
+        cleanup() { rm -rf "$LOCAL_DIR"; }
+        trap cleanup EXIT
+
+        # DEPLOY_PATH is pre-validated (resolve-project) and explicitly quoted for the remote
+        # shell via printf %q below, not raw-interpolated.
+        REMOTE_MKDIR=$(printf 'mkdir -p -- %q' "$DEPLOY_PATH")
+        # shellcheck disable=SC2029
+        ssh "$DEPLOY_USER@$DEPLOY_HOST" "$REMOTE_MKDIR"
+        scp -p -- "$LOCAL_DIR"/* "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/"
+        echo "Uploaded deploy files to $DEPLOY_HOST:$DEPLOY_PATH"

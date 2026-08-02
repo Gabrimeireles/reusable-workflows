@@ -1,0 +1,98 @@
+name: "Backup Postgres"
+description: >-
+  Waits for the Postgres service to accept connections, takes a verified pg_dump backup, applies
+  the retention policy, and never deletes the backup it just took.
+inputs:
+  enabled: { required: false, default: "true" }
+  deploy_user: { required: true }
+  deploy_host: { required: true }
+  deploy_path: { required: true }
+  compose_filename: { required: false, default: "docker-compose.yml" }
+  compose_service: { required: true }
+  container_database: { required: true }
+  container_user: { required: false, default: "postgres" }
+  retention_days: { required: false, default: "14" }
+  deploy_tag: { required: true }
+  ready_retries: { required: false, default: "30" }
+outputs:
+  backup_file:
+    description: "Path (relative to deploy_path) of the backup taken, or empty if disabled"
+    value: ${{ steps.run.outputs.backup_file }}
+runs:
+  using: "composite"
+  steps:
+    - id: run
+      shell: bash
+      env:
+        ENABLED: ${{ inputs.enabled }}
+        DEPLOY_USER: ${{ inputs.deploy_user }}
+        DEPLOY_HOST: ${{ inputs.deploy_host }}
+        DEPLOY_PATH: ${{ inputs.deploy_path }}
+        COMPOSE_FILENAME: ${{ inputs.compose_filename }}
+        COMPOSE_SERVICE: ${{ inputs.compose_service }}
+        CONTAINER_DATABASE: ${{ inputs.container_database }}
+        CONTAINER_USER: ${{ inputs.container_user }}
+        RETENTION_DAYS: ${{ inputs.retention_days }}
+        DEPLOY_TAG: ${{ inputs.deploy_tag }}
+        READY_RETRIES: ${{ inputs.ready_retries }}
+      run: |
+        set -euo pipefail
+
+        if [ "$ENABLED" != "true" ]; then
+          echo "Database backup disabled by config; skipping."
+          echo "backup_file=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+
+        {
+          printf 'DEPLOY_PATH=%q\n' "$DEPLOY_PATH"
+          printf 'COMPOSE_FILENAME=%q\n' "$COMPOSE_FILENAME"
+          printf 'COMPOSE_SERVICE=%q\n' "$COMPOSE_SERVICE"
+          printf 'CONTAINER_DATABASE=%q\n' "$CONTAINER_DATABASE"
+          printf 'CONTAINER_USER=%q\n' "$CONTAINER_USER"
+          printf 'RETENTION_DAYS=%q\n' "$RETENTION_DAYS"
+          printf 'DEPLOY_TAG=%q\n' "$DEPLOY_TAG"
+          printf 'READY_RETRIES=%q\n' "$READY_RETRIES"
+          printf 'STAMP=%q\n' "$STAMP"
+          cat <<'REMOTE_SCRIPT'
+        set -euo pipefail
+        cd "$DEPLOY_PATH"
+
+        echo "Waiting for PostgreSQL to accept connections..."
+        for attempt in $(seq 1 "$READY_RETRIES"); do
+          if docker compose --env-file .env -f "$COMPOSE_FILENAME" exec -T "$COMPOSE_SERVICE" \
+            sh -lc 'pg_isready -U "$0" -d "$1"' "$CONTAINER_USER" "$CONTAINER_DATABASE" </dev/null; then
+            break
+          fi
+          if [ "$attempt" -eq "$READY_RETRIES" ]; then
+            echo "PostgreSQL did not become ready in time" >&2
+            exit 1
+          fi
+          sleep 2
+        done
+
+        mkdir -p backups
+        chmod 700 backups
+        BACKUP_FILE="backups/pre-deploy-${DEPLOY_TAG}-${STAMP}.dump"
+
+        echo "Creating pre-deploy backup at $BACKUP_FILE..."
+        docker compose --env-file .env -f "$COMPOSE_FILENAME" exec -T "$COMPOSE_SERVICE" \
+          sh -lc 'pg_dump -U "$0" -d "$1" --format=custom --no-owner' \
+          "$CONTAINER_USER" "$CONTAINER_DATABASE" > "$BACKUP_FILE"
+        chmod 600 "$BACKUP_FILE"
+
+        echo "Verifying backup readability..."
+        docker compose --env-file .env -f "$COMPOSE_FILENAME" exec -T "$COMPOSE_SERVICE" \
+          sh -lc 'pg_restore --list' < "$BACKUP_FILE" >/dev/null
+
+        echo "Applying retention policy (${RETENTION_DAYS}d)..."
+        find backups -type f -name 'pre-deploy-*.dump' -mtime "+${RETENTION_DAYS}" -not -name "$(basename "$BACKUP_FILE")" -delete
+
+        echo "backup_file=$BACKUP_FILE"
+        REMOTE_SCRIPT
+        } | ssh "$DEPLOY_USER@$DEPLOY_HOST" "bash -s" | tee /tmp/backup-postgres-remote.log
+
+        BACKUP_FILE="$(grep '^backup_file=' /tmp/backup-postgres-remote.log | tail -1 | cut -d= -f2-)"
+        echo "backup_file=$BACKUP_FILE" >> "$GITHUB_OUTPUT"

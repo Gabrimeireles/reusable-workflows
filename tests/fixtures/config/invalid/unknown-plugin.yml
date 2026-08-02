@@ -1,0 +1,15 @@
+version: 1
+
+project:
+  name: sampleapp
+
+images:
+  - id: app
+    name: sampleapp
+    context: .
+    dockerfile: ./Dockerfile
+
+compose:
+  source: docker-compose.yml
+
+plugins: [this-plugin-does-not-exist]

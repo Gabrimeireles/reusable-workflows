@@ -1,0 +1,162 @@
+name: "Release manifest"
+description: >-
+  Assembles the release manifest (Constitution Principle XVII / ADR 0010) from data every prior
+  step already computed, writes it to the server (the snapshot stage already preserved the
+  previous one), and exposes it locally so the caller can upload it as a workflow artifact and
+  render the human-readable summary from it — never the other way around.
+inputs:
+  project_name: { required: true }
+  environment_name: { required: true }
+  environment_label: { required: false, default: "" }
+  deploy_user: { required: true }
+  deploy_host: { required: true }
+  deploy_path: { required: true }
+  compose_filename: { required: false, default: "docker-compose.yml" }
+  image_refs_json:
+    description: 'JSON map imageId -> "name:tag"'
+    required: true
+  image_details_json:
+    description: 'Optional JSON map imageId -> {ref, digest, size} (only available when built via ci-cd.yml)'
+    required: false
+    default: "{}"
+  previous_image_lines: { required: false, default: "" }
+  compose_checksum: { required: false, default: "" }
+  env_checksum: { required: false, default: "" }
+  backup_file: { required: false, default: "" }
+  migration_ran: { required: false, default: "false" }
+  reset_ran: { required: false, default: "false" }
+  seed_ran: { required: false, default: "false" }
+  health_results_json:
+    description: 'JSON array of {"name":..., "outcome":...}, empty entries filtered out'
+    required: false
+    default: "[]"
+  timings_json:
+    description: "JSON object of phase -> seconds, e.g. {\"upload\":3,\"backup\":12}"
+    required: false
+    default: "{}"
+  overall_status: { required: true }
+  duration_seconds: { required: false, default: "0" }
+outputs:
+  manifest_path:
+    description: "Local path to the rendered manifest JSON file"
+    value: ${{ steps.render.outputs.path }}
+  manifest_json:
+    value: ${{ steps.render.outputs.json }}
+runs:
+  using: "composite"
+  steps:
+    - id: render
+      shell: bash
+      env:
+        PROJECT_NAME: ${{ inputs.project_name }}
+        ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+        ENVIRONMENT_LABEL: ${{ inputs.environment_label }}
+        IMAGE_REFS_JSON: ${{ inputs.image_refs_json }}
+        IMAGE_DETAILS_JSON: ${{ inputs.image_details_json }}
+        PREVIOUS_IMAGE_LINES: ${{ inputs.previous_image_lines }}
+        COMPOSE_FILENAME: ${{ inputs.compose_filename }}
+        COMPOSE_CHECKSUM: ${{ inputs.compose_checksum }}
+        ENV_CHECKSUM: ${{ inputs.env_checksum }}
+        BACKUP_FILE: ${{ inputs.backup_file }}
+        MIGRATION_RAN: ${{ inputs.migration_ran }}
+        RESET_RAN: ${{ inputs.reset_ran }}
+        SEED_RAN: ${{ inputs.seed_ran }}
+        HEALTH_RESULTS_JSON: ${{ inputs.health_results_json }}
+        TIMINGS_JSON: ${{ inputs.timings_json }}
+        OVERALL_STATUS: ${{ inputs.overall_status }}
+        DURATION_SECONDS: ${{ inputs.duration_seconds }}
+        GIT_COMMIT: ${{ github.sha }}
+        GIT_BRANCH: ${{ github.ref_name }}
+        GIT_ACTOR: ${{ github.actor }}
+        DEPLOY_PATH: ${{ inputs.deploy_path }}
+      run: |
+        set -euo pipefail
+
+        IMAGES=$(jq -n --argjson refs "$IMAGE_REFS_JSON" --argjson details "$IMAGE_DETAILS_JSON" '
+          $refs | to_entries | map({
+            key: .key,
+            value: {
+              ref: .value,
+              digest: ($details[.key].digest // null),
+              sizeBytes: ($details[.key].size // null)
+            }
+          }) | from_entries
+        ')
+
+        HEALTH=$(jq -c '[.[] | select(.name != "" and .name != null)]' <<< "$HEALTH_RESULTS_JSON")
+
+        ROLLBACK_CMD="cd $DEPLOY_PATH && docker compose --env-file .env.previous -f docker-compose.previous.yml up -d --force-recreate"
+
+        MANIFEST=$(jq -n \
+          --arg project "$PROJECT_NAME" \
+          --arg environment "$ENVIRONMENT_NAME" \
+          --arg environmentLabel "$ENVIRONMENT_LABEL" \
+          --arg commit "$GIT_COMMIT" \
+          --arg branch "$GIT_BRANCH" \
+          --arg actor "$GIT_ACTOR" \
+          --argjson images "$IMAGES" \
+          --arg previousImages "$PREVIOUS_IMAGE_LINES" \
+          --arg composeFile "$COMPOSE_FILENAME" \
+          --arg composeChecksum "$COMPOSE_CHECKSUM" \
+          --arg envChecksum "$ENV_CHECKSUM" \
+          --arg backupFile "$BACKUP_FILE" \
+          --argjson migrationRan "$MIGRATION_RAN" \
+          --argjson resetRan "$RESET_RAN" \
+          --argjson seedRan "$SEED_RAN" \
+          --argjson timings "$TIMINGS_JSON" \
+          --argjson healthChecks "$HEALTH" \
+          --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --argjson durationSeconds "$DURATION_SECONDS" \
+          --arg overallStatus "$OVERALL_STATUS" \
+          --arg rollbackCommand "$ROLLBACK_CMD" \
+          '{
+            manifestVersion: 1,
+            project: $project,
+            environment: $environment
+          }
+          + (if $environmentLabel != "" then {environmentLabel: $environmentLabel} else {} end)
+          + {
+            git: {commit: $commit, branch: $branch, actor: $actor},
+            images: $images,
+            compose: ({file: $composeFile, checksum: $composeChecksum}
+              + (if $envChecksum != "" then {envChecksum: $envChecksum} else {} end)),
+            database: {backupFile: (if $backupFile == "" then null else $backupFile end),
+                       migrationRan: $migrationRan, resetRan: $resetRan, seedRan: $seedRan},
+            timings: $timings,
+            healthChecks: $healthChecks,
+            timestamp: $timestamp,
+            durationSeconds: $durationSeconds,
+            overallStatus: $overallStatus,
+            rollbackCommand: $rollbackCommand
+          }
+          + (if $previousImages != "" then {previousImages: $previousImages} else {} end)
+        ')
+
+        FILE="$RUNNER_TEMP/release-manifest.json"
+        printf '%s' "$MANIFEST" > "$FILE"
+        echo "path=$FILE" >> "$GITHUB_OUTPUT"
+        {
+          echo "json<<__MANIFEST_EOF__"
+          printf '%s\n' "$MANIFEST"
+          echo "__MANIFEST_EOF__"
+        } >> "$GITHUB_OUTPUT"
+
+    - shell: bash
+      env:
+        DEPLOY_USER: ${{ inputs.deploy_user }}
+        DEPLOY_HOST: ${{ inputs.deploy_host }}
+        DEPLOY_PATH: ${{ inputs.deploy_path }}
+        MANIFEST_PATH: ${{ steps.render.outputs.path }}
+      run: |
+        set -euo pipefail
+        # Two separate ssh calls, deliberately: the second one's remote command is a single
+        # `cat > file`, with the LOCAL manifest file (not a concatenated script+data stream) as
+        # its stdin — piping a script body and its own data through one shared stdin (`bash -s`
+        # reading past its script text into "data" on the same stream) is a known-fragile
+        # pattern in bash (unspecified read-ahead buffering), so it's avoided here.
+        REMOTE_MKDIR=$(printf 'mkdir -p -- %q' "$DEPLOY_PATH")
+        # shellcheck disable=SC2029
+        ssh "$DEPLOY_USER@$DEPLOY_HOST" "$REMOTE_MKDIR"
+        REMOTE_CAT=$(printf 'cat > %q/release-manifest.json' "$DEPLOY_PATH")
+        # shellcheck disable=SC2029
+        ssh "$DEPLOY_USER@$DEPLOY_HOST" "$REMOTE_CAT" < "$MANIFEST_PATH"

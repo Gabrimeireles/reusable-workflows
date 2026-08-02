@@ -1,0 +1,29 @@
+version: 1
+
+project:
+  name: sampleapp
+
+images:
+  - id: app
+    name: sampleapp
+    context: .
+    dockerfile: ./Dockerfile
+
+compose:
+  source: docker-compose.yml
+
+environmentFiles:
+  - secret: ENV_A
+    destination: .env.a
+  - secret: ENV_B
+    destination: .env.b
+  - secret: ENV_C
+    destination: .env.c
+  - secret: ENV_D
+    destination: .env.d
+  - secret: ENV_E
+    destination: .env.e
+  - secret: ENV_F
+    destination: .env.f
+  - secret: ENV_G
+    destination: .env.g

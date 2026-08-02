@@ -1,0 +1,203 @@
+name: Reusable - CI/CD (build matrix + deploy)
+
+# The recommended entry point for new projects (docs/adding-a-project.md): builds every image
+# declared in the caller's config via a matrix (no per-image job needed — spec.md User Story 1),
+# then deploys via deploy-stack.yml. docker-build.yml and deploy-stack.yml remain independently
+# callable for projects that need more control (see docs/adr/0008-build-matrix-fanin.md).
+
+on:
+  workflow_call:
+    inputs:
+      project_name:
+        required: true
+        type: string
+      environment_name:
+        required: true
+        type: string
+      deploy_path:
+        required: false
+        type: string
+        default: ""
+      base_dir:
+        required: false
+        type: string
+        default: "/srv/stacks"
+      configuration_file:
+        required: false
+        type: string
+        default: ""
+      reset_database:
+        required: false
+        type: boolean
+        default: false
+      run_seeders:
+        required: false
+        type: boolean
+        default: false
+      use_tailscale:
+        required: false
+        type: boolean
+        default: true
+      health_url_override:
+        required: false
+        type: string
+        default: ""
+      default_branch:
+        description: 'Branch on which the floating "latest" build tag is pushed'
+        required: false
+        type: string
+        default: "master"
+    secrets:
+      DEPLOY_HOST: { required: false }
+      DEPLOY_USER: { required: false }
+      DEPLOY_SSH_KEY: { required: false }
+      GHCR_PAT: { required: false }
+      TS_OAUTH_CLIENT_ID: { required: false }
+      TS_OAUTH_SECRET: { required: false }
+      COMPOSE_ENV_EXTRA: { required: false }
+      ENV_FILE_1: { required: false }
+      ENV_FILE_2: { required: false }
+      ENV_FILE_3: { required: false }
+      ENV_FILE_4: { required: false }
+      ENV_FILE_5: { required: false }
+      ENV_FILE_6: { required: false }
+    outputs:
+      health_status:
+        value: ${{ jobs.deploy.outputs.health_status }}
+      deployment_time_seconds:
+        value: ${{ jobs.deploy.outputs.deployment_time_seconds }}
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-${{ inputs.project_name }}-${{ inputs.environment_name }}
+  cancel-in-progress: false
+
+jobs:
+  load:
+    name: Load config
+    runs-on: ubuntu-latest
+    outputs:
+      configuration_file: ${{ steps.config_path.outputs.path }}
+      images: ${{ steps.extract.outputs.images }}
+      pre_build_command: ${{ steps.extract.outputs.pre_build_command }}
+      post_build_command: ${{ steps.extract.outputs.post_build_command }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Determine configuration file path
+        id: config_path
+        shell: bash
+        env:
+          CONFIGURATION_FILE: ${{ inputs.configuration_file }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CONFIGURATION_FILE" ]; then
+            echo "path=$CONFIGURATION_FILE" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=.github/deploy/${ENVIRONMENT_NAME}.yml" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Load config
+        id: config
+        uses: ./.github/actions/load-config
+        with:
+          configuration_file: ${{ steps.config_path.outputs.path }}
+
+      - name: Extract images and build hooks
+        id: extract
+        shell: bash
+        env:
+          CONFIG: ${{ steps.config.outputs.config }}
+        run: |
+          set -euo pipefail
+          {
+            echo "images=$(jq -c '.images' <<< "$CONFIG")"
+            echo "pre_build_command=$(jq -r '.hooks.pre_build // "" | if type == "object" then "bash " + .script else . end' <<< "$CONFIG")"
+            echo "post_build_command=$(jq -r '.hooks.post_build // "" | if type == "object" then "bash " + .script else . end' <<< "$CONFIG")"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build images
+    needs: load
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.load.outputs.images) }}
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      image_name: ${{ matrix.image.name }}
+      dockerfile: ${{ matrix.image.dockerfile }}
+      context: ${{ matrix.image.context }}
+      version_file: ""
+      default_branch: ${{ inputs.default_branch }}
+      artifact_id: ${{ matrix.image.id }}
+      pre_build_command: ${{ needs.load.outputs.pre_build_command }}
+      post_build_command: ${{ needs.load.outputs.post_build_command }}
+
+  collect:
+    name: Collect build results
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      image_refs: ${{ steps.merge.outputs.image_refs }}
+      image_details: ${{ steps.merge.outputs.image_details }}
+    steps:
+      - name: Download all image artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: image-*
+          path: image-artifacts
+          merge-multiple: true
+
+      - name: Merge into image_refs
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(image-artifacts/*.json)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::No image artifacts were collected — the build matrix produced nothing"
+            exit 1
+          fi
+          {
+            echo "image_refs=$(jq -sc 'map({(.id): (.image + ":" + .tag)}) | add' "${files[@]}")"
+            echo "image_details=$(jq -sc 'map({(.id): {ref: (.image + ":" + .tag), digest, size}}) | add' "${files[@]}")"
+          } >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy
+    needs: collect
+    uses: ./.github/workflows/deploy-stack.yml
+    with:
+      project_name: ${{ inputs.project_name }}
+      environment_name: ${{ inputs.environment_name }}
+      deploy_path: ${{ inputs.deploy_path }}
+      base_dir: ${{ inputs.base_dir }}
+      configuration_file: ${{ inputs.configuration_file }}
+      image_refs: ${{ needs.collect.outputs.image_refs }}
+      image_details: ${{ needs.collect.outputs.image_details }}
+      reset_database: ${{ inputs.reset_database }}
+      run_seeders: ${{ inputs.run_seeders }}
+      use_tailscale: ${{ inputs.use_tailscale }}
+      health_url_override: ${{ inputs.health_url_override }}
+    secrets:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      GHCR_PAT: ${{ secrets.GHCR_PAT }}
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+      COMPOSE_ENV_EXTRA: ${{ secrets.COMPOSE_ENV_EXTRA }}
+      ENV_FILE_1: ${{ secrets.ENV_FILE_1 }}
+      ENV_FILE_2: ${{ secrets.ENV_FILE_2 }}
+      ENV_FILE_3: ${{ secrets.ENV_FILE_3 }}
+      ENV_FILE_4: ${{ secrets.ENV_FILE_4 }}
+      ENV_FILE_5: ${{ secrets.ENV_FILE_5 }}
+      ENV_FILE_6: ${{ secrets.ENV_FILE_6 }}

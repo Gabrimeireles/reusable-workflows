@@ -1,0 +1,27 @@
+version: 1
+
+project:
+  name: multiapp
+
+images:
+  - id: api
+    name: multiapp-api
+    context: ./api
+    dockerfile: ./api/Dockerfile
+  - id: worker
+    name: multiapp-worker
+    context: ./worker
+    dockerfile: ./worker/Dockerfile
+  - id: web
+    name: multiapp-web
+    context: ./web
+    dockerfile: ./web/Dockerfile
+
+compose:
+  source: docker-compose.yml
+  applicationServices: [api, worker, web]
+
+database:
+  enabled: false
+
+healthChecks: []

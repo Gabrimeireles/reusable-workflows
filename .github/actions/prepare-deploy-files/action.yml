@@ -1,0 +1,120 @@
+name: "Prepare deploy files"
+description: >-
+  Renders the Compose file, the Compose .env file, and up to 6 positional application env files
+  into a private, owner-only local directory ready for upload.
+inputs:
+  compose_source_path:
+    description: "Path to the Compose file in the caller repository"
+    required: true
+  compose_destination_name:
+    description: "Filename to give the Compose file on the server"
+    required: false
+    default: "docker-compose.yml"
+  dotenv_contents:
+    description: "Full contents of the Compose .env file (variable substitution values)"
+    required: true
+  env_file_1_contents: { required: false, default: "" }
+  env_file_1_destination: { required: false, default: "" }
+  env_file_1_required: { required: false, default: "false" }
+  env_file_2_contents: { required: false, default: "" }
+  env_file_2_destination: { required: false, default: "" }
+  env_file_2_required: { required: false, default: "false" }
+  env_file_3_contents: { required: false, default: "" }
+  env_file_3_destination: { required: false, default: "" }
+  env_file_3_required: { required: false, default: "false" }
+  env_file_4_contents: { required: false, default: "" }
+  env_file_4_destination: { required: false, default: "" }
+  env_file_4_required: { required: false, default: "false" }
+  env_file_5_contents: { required: false, default: "" }
+  env_file_5_destination: { required: false, default: "" }
+  env_file_5_required: { required: false, default: "false" }
+  env_file_6_contents: { required: false, default: "" }
+  env_file_6_destination: { required: false, default: "" }
+  env_file_6_required: { required: false, default: "false" }
+outputs:
+  local_dir:
+    description: "Local directory containing the rendered files, ready for upload"
+    value: ${{ steps.render.outputs.local_dir }}
+  compose_checksum:
+    description: "sha256 of the rendered Compose file (for the release manifest — never the contents)"
+    value: ${{ steps.render.outputs.compose_checksum }}
+  env_checksum:
+    description: "sha256 of the rendered .env file (for the release manifest — never the contents)"
+    value: ${{ steps.render.outputs.env_checksum }}
+runs:
+  using: "composite"
+  steps:
+    - id: render
+      shell: bash
+      env:
+        COMPOSE_SOURCE_PATH: ${{ inputs.compose_source_path }}
+        COMPOSE_DESTINATION_NAME: ${{ inputs.compose_destination_name }}
+        DOTENV_CONTENTS: ${{ inputs.dotenv_contents }}
+        EF1_C: ${{ inputs.env_file_1_contents }}
+        EF1_D: ${{ inputs.env_file_1_destination }}
+        EF1_R: ${{ inputs.env_file_1_required }}
+        EF2_C: ${{ inputs.env_file_2_contents }}
+        EF2_D: ${{ inputs.env_file_2_destination }}
+        EF2_R: ${{ inputs.env_file_2_required }}
+        EF3_C: ${{ inputs.env_file_3_contents }}
+        EF3_D: ${{ inputs.env_file_3_destination }}
+        EF3_R: ${{ inputs.env_file_3_required }}
+        EF4_C: ${{ inputs.env_file_4_contents }}
+        EF4_D: ${{ inputs.env_file_4_destination }}
+        EF4_R: ${{ inputs.env_file_4_required }}
+        EF5_C: ${{ inputs.env_file_5_contents }}
+        EF5_D: ${{ inputs.env_file_5_destination }}
+        EF5_R: ${{ inputs.env_file_5_required }}
+        EF6_C: ${{ inputs.env_file_6_contents }}
+        EF6_D: ${{ inputs.env_file_6_destination }}
+        EF6_R: ${{ inputs.env_file_6_required }}
+      run: |
+        set -euo pipefail
+
+        if [[ "$COMPOSE_DESTINATION_NAME" != "${COMPOSE_DESTINATION_NAME//\//}" ]]; then
+          echo "::error::compose_destination_name must not contain '/' (got '$COMPOSE_DESTINATION_NAME')"
+          exit 1
+        fi
+        if [ ! -f "$COMPOSE_SOURCE_PATH" ]; then
+          echo "::error::Compose source file '$COMPOSE_SOURCE_PATH' not found"
+          exit 1
+        fi
+
+        umask 177
+        LOCAL_DIR="$(mktemp -d)"
+        chmod 700 "$LOCAL_DIR"
+
+        cp "$COMPOSE_SOURCE_PATH" "$LOCAL_DIR/$COMPOSE_DESTINATION_NAME"
+        printf '%s' "$DOTENV_CONTENTS" > "$LOCAL_DIR/.env"
+
+        for i in 1 2 3 4 5 6; do
+          c_var="EF${i}_C"; d_var="EF${i}_D"; r_var="EF${i}_R"
+          contents="${!c_var}"
+          destination="${!d_var}"
+          required="${!r_var}"
+
+          [ -z "$destination" ] && continue
+
+          if [[ "$destination" != "${destination//\//}" ]]; then
+            echo "::error::env file destination #$i must not contain '/' (got '$destination')"
+            exit 1
+          fi
+
+          if [ -z "$contents" ]; then
+            if [ "$required" = "true" ]; then
+              echo "::error::Required environment file #$i (destination '$destination') has no content — check the corresponding ENV_FILE_${i} secret"
+              exit 1
+            fi
+            echo "Optional environment file #$i (destination '$destination') is empty; writing an empty placeholder."
+            printf '# Optional environment file intentionally left empty.\n' > "$LOCAL_DIR/$destination"
+          else
+            printf '%s\n' "$contents" > "$LOCAL_DIR/$destination"
+          fi
+        done
+
+        find "$LOCAL_DIR" -type f -exec chmod 600 {} \;
+        {
+          echo "local_dir=$LOCAL_DIR"
+          echo "compose_checksum=$(sha256sum "$LOCAL_DIR/$COMPOSE_DESTINATION_NAME" | cut -d' ' -f1)"
+          echo "env_checksum=$(sha256sum "$LOCAL_DIR/.env" | cut -d' ' -f1)"
+        } >> "$GITHUB_OUTPUT"

@@ -22,6 +22,47 @@ on:
         required: false
         type: string
         default: '24'
+      version_file:
+        description: >-
+          Path to a package.json to extract a "vX.Y.Z" tag from. Defaults to the historical
+          behavior (repo root). Point it at a subfolder (e.g. backend/package.json) for a
+          monorepo image, or pass "" to disable version-tag extraction entirely. A missing file
+          is skipped, not an error.
+        required: false
+        type: string
+        default: './package.json'
+      build_args:
+        description: 'JSON object of non-secret build args, e.g. {"VITE_API_BASE_URL":"https://..."}'
+        required: false
+        type: string
+        default: '{}'
+      default_branch:
+        description: 'Branch on which the floating "latest" tag is pushed'
+        required: false
+        type: string
+        default: 'master'
+      artifact_id:
+        description: >-
+          When set, uploads a workflow artifact (image-<artifact_id>.json: {id, image, tag,
+          digest, size}) for a matrix caller (ci-cd.yml) to collect. Standalone callers that
+          don't set this get no artifact and no behavior change — purely additive.
+        required: false
+        type: string
+        default: ''
+      pre_build_command:
+        description: >-
+          Resolved pre_build hook command (docs/adr/0009-hooks.md), run on the runner before the
+          build. Empty = no-op. This workflow never inspects or resolves hooks itself — the
+          caller (ci-cd.yml) resolves the config's pre_build/post_build hook and passes the
+          final command here.
+        required: false
+        type: string
+        default: ''
+      post_build_command:
+        description: 'Resolved post_build hook command, run after a successful build/push.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -35,6 +76,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       digest: ${{ steps.build.outputs.digest }}
       image: ${{ steps.owner.outputs.owner_image }}
+      tag: ${{ steps.owner.outputs.sha_tag }}
+      size: ${{ steps.size.outputs.bytes }}
 
     steps:
       - name: Checkout
@@ -42,25 +85,77 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: pre_build hook
+        if: inputs.pre_build_command != ''
+        shell: bash
+        env:
+          COMMAND: ${{ inputs.pre_build_command }}
+        run: bash -c "$COMMAND"
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: ${{ inputs.node_version }}
 
-      - name: Extract package version
+      - name: Extract package version (optional)
         id: version
         shell: bash
+        env:
+          VERSION_FILE: ${{ inputs.version_file }}
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [ -z "$VERSION_FILE" ]; then
+            echo "version_file not set; skipping version-tag extraction."
+            echo "version=" >> "$GITHUB_OUTPUT"
+          elif [ ! -f "$VERSION_FILE" ]; then
+            echo "version_file '$VERSION_FILE' not found; skipping version-tag extraction."
+            echo "version=" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(node -p "require('./' + process.env.VERSION_FILE.replace(/^\.\//, '')).version")
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Set image owner and image
+      # Owner-lowercasing / SHA-tag logic below matches .github/scripts/lib/image-tags.sh
+      # (unit-tested in tests/bats/docker-build-tags.bats) byte-for-byte. It's inlined here
+      # rather than sourced because a reusable workflow's steps run against the CALLER's
+      # checkout, not this repository's own files (only composite actions get that for free).
+      - name: Set image owner and tags
         id: owner
         shell: bash
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          SHA: ${{ github.sha }}
         run: |
-          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "owner=$OWNER_LOWER" >> "$GITHUB_OUTPUT"
-          echo "owner_image=ghcr.io/$OWNER_LOWER/${{ inputs.image_name }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          OWNER_LOWER=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          {
+            echo "owner=$OWNER_LOWER"
+            echo "owner_image=ghcr.io/$OWNER_LOWER/$IMAGE_NAME"
+            echo "sha_tag=sha-${SHA:0:7}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Render build args
+        id: build_args
+        shell: bash
+        env:
+          BUILD_ARGS_JSON: ${{ inputs.build_args }}
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::error::jq is required on the runner"
+            exit 1
+          fi
+          BAD_KEYS=$(jq -r 'keys[] | select(test("SECRET|TOKEN|PASSWORD|KEY";"i"))' <<< "$BUILD_ARGS_JSON" || true)
+          if [ -n "$BAD_KEYS" ]; then
+            echo "::error::build_args keys must not look like a secret (SECRET/TOKEN/PASSWORD/KEY): $BAD_KEYS"
+            exit 1
+          fi
+          {
+            echo "rendered<<__BUILD_ARGS_EOF__"
+            jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$BUILD_ARGS_JSON"
+            echo "__BUILD_ARGS_EOF__"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -82,8 +177,8 @@ jobs:
             type=ref,event=branch
             type=ref,event=pr
             type=sha,prefix=sha-
-            type=raw,value=v${{ steps.version.outputs.version }},enable=${{ github.ref == 'refs/heads/master' }}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+            type=raw,value=v${{ steps.version.outputs.version }},enable=${{ github.ref == format('refs/heads/{0}', inputs.default_branch) && steps.version.outputs.version != '' }}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', inputs.default_branch) }}
           labels: |
             org.opencontainers.image.title=${{ inputs.image_name }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -96,9 +191,56 @@ jobs:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
           push: ${{ github.event_name != 'pull_request' }}
+          load: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             BUILD_DATE=${{ github.event.head_commit.timestamp || github.run_id }}
             VCS_REF=${{ github.sha }}
             VERSION=${{ steps.version.outputs.version }}
+            ${{ steps.build_args.outputs.rendered }}
+
+      - name: post_build hook
+        if: inputs.post_build_command != ''
+        shell: bash
+        env:
+          COMMAND: ${{ inputs.post_build_command }}
+        run: bash -c "$COMMAND"
+
+      - name: Measure image size
+        id: size
+        shell: bash
+        env:
+          IMAGE_REF: ${{ steps.owner.outputs.owner_image }}
+          TAG: ${{ steps.owner.outputs.sha_tag }}
+        run: |
+          set -euo pipefail
+          BYTES=$(docker image inspect "${IMAGE_REF}:${TAG}" --format='{{.Size}}' 2>/dev/null || echo "")
+          echo "bytes=$BYTES" >> "$GITHUB_OUTPUT"
+
+      - name: Render matrix collection artifact
+        if: inputs.artifact_id != ''
+        id: artifact_json
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          IMAGE_REF: ${{ steps.owner.outputs.owner_image }}
+          TAG: ${{ steps.owner.outputs.sha_tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SIZE: ${{ steps.size.outputs.bytes }}
+        run: |
+          set -euo pipefail
+          FILE="$RUNNER_TEMP/image-${ARTIFACT_ID}.json"
+          jq -n --arg id "$ARTIFACT_ID" --arg image "$IMAGE_REF" --arg tag "$TAG" \
+            --arg digest "$DIGEST" --arg size "$SIZE" \
+            '{id: $id, image: $image, tag: $tag, digest: $digest, size: ($size | tonumber? // null)}' \
+            > "$FILE"
+          echo "path=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload matrix collection artifact
+        if: inputs.artifact_id != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ inputs.artifact_id }}
+          path: ${{ steps.artifact_json.outputs.path }}
+          retention-days: 7

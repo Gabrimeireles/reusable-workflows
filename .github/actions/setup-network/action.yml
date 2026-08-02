@@ -1,0 +1,44 @@
+name: "Setup network (Tailscale)"
+description: "Optionally connects the runner to Tailscale before SSH/SCP steps."
+inputs:
+  enabled:
+    description: "Whether to connect to Tailscale"
+    required: false
+    default: "true"
+  oauth_client_id:
+    description: "Tailscale OAuth client ID"
+    required: false
+    default: ""
+  oauth_secret:
+    description: "Tailscale OAuth secret"
+    required: false
+    default: ""
+  tag:
+    description: "Tailscale ACL tag to use for this ephemeral node"
+    required: false
+    default: "tag:dev-ci"
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      env:
+        ENABLED: ${{ inputs.enabled }}
+        OAUTH_CLIENT_ID: ${{ inputs.oauth_client_id }}
+        OAUTH_SECRET: ${{ inputs.oauth_secret }}
+      run: |
+        set -euo pipefail
+        if [ "$ENABLED" != "true" ]; then
+          echo "Tailscale disabled by caller; skipping."
+          exit 0
+        fi
+        if [ -z "$OAUTH_CLIENT_ID" ] || [ -z "$OAUTH_SECRET" ]; then
+          echo "::error::use_tailscale is enabled but TS_OAUTH_CLIENT_ID/TS_OAUTH_SECRET secrets are missing"
+          exit 1
+        fi
+    # tailscale/github-action pinned by commit SHA (Principle XIII); resolved during T071.
+    - if: ${{ inputs.enabled == 'true' }}
+      uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+      with:
+        oauth-client-id: ${{ inputs.oauth_client_id }}
+        oauth-secret: ${{ inputs.oauth_secret }}
+        tags: ${{ inputs.tag }}

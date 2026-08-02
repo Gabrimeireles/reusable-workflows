@@ -1,0 +1,11 @@
+services:
+  postgres:
+    image: postgres:17
+  redis:
+    image: redis:7
+  pgadmin:
+    image: dpage/pgadmin4:9
+  backend:
+    image: myapp-backend
+  web:
+    image: myapp-web

@@ -1,0 +1,213 @@
+name: Reusable - Create Release
+
+# Net-new, additive workflow (docs/adr/0004-versioning-strategy.md). github-release.yml is kept
+# unchanged for its existing consumers (CoGuide_PPS_BackEnd/FrontEnd, Conecta_SLA — see
+# specs/001-reusable-ci-platform/analysis-report.md Finding 2); new callers use this one.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref (branch/SHA) used for release source'
+        required: false
+        type: string
+        default: ''
+      release_version:
+        description: 'Release version without v prefix. Empty => extracted from version_file'
+        required: false
+        type: string
+        default: ''
+      version_file:
+        description: 'Path to a package.json to extract the version from when release_version is empty'
+        required: false
+        type: string
+        default: './package.json'
+      prerelease:
+        description: 'Mark release as prerelease'
+        required: false
+        type: boolean
+        default: false
+      update_major_tag:
+        description: >-
+          After tagging vX.Y.Z, also force-move the floating vX tag to the same commit (ADR
+          0004 amendment). Never happens for prereleases regardless of this input, and skipped
+          (with a warning) if the new commit is not a descendant of vX's current target, to
+          avoid regressing the floating tag from an out-of-order release.
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      DISCORD_WEBHOOK_URL:
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Tag & Release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+      url: ${{ steps.create_release.outputs.url || steps.existing_release.outputs.url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref != '' && inputs.ref || github.ref }}
+
+      - name: Resolve release version
+        id: vars
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          VERSION_FILE: ${{ inputs.version_file }}
+        run: |
+          set -euo pipefail
+          if [ -n "$RELEASE_VERSION" ]; then
+            VERSION="$RELEASE_VERSION"
+          elif [ -n "$VERSION_FILE" ] && [ -f "$VERSION_FILE" ]; then
+            VERSION=$(node -p "require('./' + process.env.VERSION_FILE.replace(/^\.\//, '')).version")
+          else
+            echo "::error::No release_version provided and version_file '$VERSION_FILE' not found"
+            exit 1
+          fi
+          TAG="v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag exists
+        id: exists
+        shell: bash
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tag
+        if: steps.exists.outputs.exists != 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Move floating major tag
+        id: major_tag
+        if: steps.exists.outputs.exists != 'true' && inputs.update_major_tag && !inputs.prerelease
+        shell: bash
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          set -euo pipefail
+          MAJOR="v${VERSION%%.*}"
+          NEW_COMMIT=$(git rev-parse HEAD)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rev-parse "$MAJOR" >/dev/null 2>&1; then
+            CURRENT_COMMIT=$(git rev-parse "${MAJOR}^{commit}")
+            if [ "$CURRENT_COMMIT" = "$NEW_COMMIT" ]; then
+              echo "moved=false" >> "$GITHUB_OUTPUT"
+            elif git merge-base --is-ancestor "$CURRENT_COMMIT" "$NEW_COMMIT"; then
+              git tag -f "$MAJOR" "$NEW_COMMIT"
+              git push origin "$MAJOR" --force
+              echo "Moved floating tag $MAJOR -> $NEW_COMMIT"
+              echo "moved=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::Not moving $MAJOR: its current target $CURRENT_COMMIT is not an ancestor of the new release commit $NEW_COMMIT (this release was likely tagged from an older branch — moving would regress $MAJOR). Skipping."
+              echo "moved=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            git tag "$MAJOR" "$NEW_COMMIT"
+            git push origin "$MAJOR"
+            echo "Created floating tag $MAJOR -> $NEW_COMMIT"
+            echo "moved=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: steps.exists.outputs.exists != 'true'
+        id: create_release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.vars.outputs.tag }}
+          IS_PRERELEASE: ${{ inputs.prerelease }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            const release = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Release ${tag}`,
+              draft: false,
+              prerelease: process.env.IS_PRERELEASE === 'true',
+              generate_release_notes: true,
+            });
+            core.setOutput('url', release.data.html_url);
+
+      - name: Reuse existing release URL
+        if: steps.exists.outputs.exists == 'true'
+        id: existing_release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.vars.outputs.tag }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag,
+            });
+            core.setOutput('url', release.data.html_url);
+
+      - name: Summary
+        shell: bash
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+          TAG: ${{ steps.vars.outputs.tag }}
+          NEW_URL: ${{ steps.create_release.outputs.url }}
+          EXISTING_URL: ${{ steps.existing_release.outputs.url }}
+          MAJOR: ${{ steps.major_tag.outputs.major }}
+          MOVED: ${{ steps.major_tag.outputs.moved }}
+        run: |
+          set -euo pipefail
+          URL="${NEW_URL:-$EXISTING_URL}"
+          {
+            echo "## Release"
+            echo "- Version: $VERSION"
+            echo "- Tag: $TAG"
+            echo "- URL: $URL"
+            if [ -n "$MAJOR" ]; then
+              if [ "$MOVED" = "true" ]; then
+                echo "- Floating tag \`$MAJOR\` now points here"
+              else
+                echo "- Floating tag \`$MAJOR\` was NOT moved (see warnings above)"
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify Discord
+        if: env.DISCORD_WEBHOOK_URL != ''
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1
+        with:
+          webhook: ${{ env.DISCORD_WEBHOOK_URL }}
+          status: success
+          title: "Release ${{ steps.vars.outputs.tag }}"
+          description: "${{ steps.create_release.outputs.url || steps.existing_release.outputs.url }}"
+          color: 3066993
+          username: Release Bot

@@ -1,0 +1,62 @@
+name: "Load deploy config"
+description: >-
+  Parses the caller's declarative YAML deploy config, validates it against the platform's
+  schema (see .github/schema/deploy-config.schema.json), and exposes it as a JSON output for
+  downstream steps to read with fromJSON().
+inputs:
+  configuration_file:
+    description: "Path (in the caller repository) to the declarative config YAML file"
+    required: true
+outputs:
+  config:
+    description: "The validated config as a compact JSON string; use fromJSON() to consume it"
+    value: ${{ steps.load.outputs.config }}
+runs:
+  using: "composite"
+  steps:
+    - id: load
+      shell: bash
+      env:
+        CONFIGURATION_FILE: ${{ inputs.configuration_file }}
+        VALIDATOR: ${{ github.action_path }}/../../scripts/validate-config.mjs
+      run: |
+        set -euo pipefail
+
+        if [[ "$CONFIGURATION_FILE" == *".."* ]]; then
+          echo "::error::configuration_file must not contain '..' (got '$CONFIGURATION_FILE')"
+          exit 1
+        fi
+
+        if [ ! -f "$CONFIGURATION_FILE" ]; then
+          echo "::error::configuration_file '$CONFIGURATION_FILE' not found in caller repository"
+          exit 1
+        fi
+
+        if ! command -v yq >/dev/null 2>&1; then
+          echo "::error::yq is required on the runner to load the deploy config"
+          exit 1
+        fi
+        if ! command -v node >/dev/null 2>&1; then
+          echo "::error::node is required on the runner to validate the deploy config"
+          exit 1
+        fi
+
+        CONFIG_JSON="$(yq -o=json eval '.' "$CONFIGURATION_FILE")"
+
+        set +e
+        VALIDATED_JSON="$(printf '%s' "$CONFIG_JSON" | node "$VALIDATOR")"
+        STATUS=$?
+        set -e
+
+        if [ "$STATUS" -ne 0 ]; then
+          echo "::error::Deploy configuration '$CONFIGURATION_FILE' failed validation (see log above)"
+          exit 1
+        fi
+
+        {
+          echo "config<<__CONFIG_JSON_EOF__"
+          printf '%s\n' "$VALIDATED_JSON"
+          echo "__CONFIG_JSON_EOF__"
+        } >> "$GITHUB_OUTPUT"
+
+        echo "Loaded and validated $CONFIGURATION_FILE"

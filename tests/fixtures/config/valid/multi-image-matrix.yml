@@ -1,0 +1,26 @@
+version: 1
+
+project:
+  name: sampleapp
+
+images:
+  - id: app
+    name: sampleapp
+    context: .
+    dockerfile: ./Dockerfile
+  - id: api
+    name: sampleapp-api
+    context: ./api
+    dockerfile: ./api/Dockerfile
+  - id: worker
+    name: sampleapp-worker
+    context: ./worker
+    dockerfile: ./worker/Dockerfile
+  - id: web
+    name: sampleapp-web
+    context: ./web
+    dockerfile: ./web/Dockerfile
+
+compose:
+  source: docker-compose.yml
+  applicationServices: [app, api, worker, web]

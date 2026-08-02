@@ -1,0 +1,52 @@
+name: "Setup SSH"
+description: "Loads the deploy SSH key into an agent and pins the target host key into known_hosts."
+inputs:
+  ssh_private_key:
+    description: "Private key for the deploy user"
+    required: true
+  deploy_host:
+    description: "Target host (DNS name, Tailscale name, or IP)"
+    required: true
+  retries:
+    description: "ssh-keyscan retry attempts"
+    required: false
+    default: "6"
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+        DEPLOY_HOST: ${{ inputs.deploy_host }}
+      run: |
+        set -euo pipefail
+        if [ -z "$SSH_PRIVATE_KEY" ]; then
+          echo "::error::Missing required secret: DEPLOY_SSH_KEY"
+          exit 1
+        fi
+        if [ -z "$DEPLOY_HOST" ]; then
+          echo "::error::Missing required secret: DEPLOY_HOST"
+          exit 1
+        fi
+    # webfactory/ssh-agent pinned by commit SHA (Principle XIII); resolved during T071.
+    - uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
+      with:
+        ssh-private-key: ${{ inputs.ssh_private_key }}
+    - shell: bash
+      env:
+        DEPLOY_HOST: ${{ inputs.deploy_host }}
+        RETRIES: ${{ inputs.retries }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        for attempt in $(seq 1 "$RETRIES"); do
+          if ssh-keyscan -T 15 -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null; then
+            echo "Host key pinned for $DEPLOY_HOST"
+            exit 0
+          fi
+          echo "ssh-keyscan failed on attempt $attempt/$RETRIES; retrying..."
+          sleep 5
+        done
+        echo "::error::Unable to scan SSH host key for $DEPLOY_HOST after $RETRIES attempts"
+        exit 1
