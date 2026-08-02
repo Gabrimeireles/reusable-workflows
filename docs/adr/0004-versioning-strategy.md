@@ -41,3 +41,14 @@ published, moving reference.
 - Pricely's post-migration workflow pins to a concrete `v1.0.0`-style tag with a documented
   upgrade procedure (`docs/architecture.md` "Updating v1"), closing the "permanently on a
   temporary SHA" gap called out in the brief.
+
+## Amendment (Iteration 2 — 2026-08-02)
+
+The "separate, maintainer-triggered step" for moving the floating major tag is superseded:
+`release.yml` now force-moves `refs/tags/vMAJOR` to the newly-tagged commit automatically,
+immediately after creating a non-prerelease `vMAJOR.MINOR.PATCH` tag, via a boolean input
+`update_major_tag` (default `true`) that a caller can set to `false` to opt out for a specific
+run. Prereleases never move the floating tag. This removes the manual step this ADR originally
+required, while keeping it a deliberate, per-run-overridable action rather than an unconditional
+one — see `specs/002-platform-maturity/spec.md` FR-080/FR-081 for the exact behavior and
+`specs/002-platform-maturity/clarify-log.md` Q3 for why this changed.

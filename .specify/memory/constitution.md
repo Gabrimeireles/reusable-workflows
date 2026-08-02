@@ -1,10 +1,15 @@
 <!--
 Sync Impact Report
-- Version change: none -> 1.0.0 (initial ratification)
-- Modified principles: n/a (template placeholders replaced)
-- Added sections: 15 Core Principles, Configuration Boundary, Secrets & Environments Policy,
-  Quality Gates, Governance
+- Version change: 1.0.0 -> 1.1.0
+- Modified principles: none redefined
+- Added principles: XVI. Extensibility Lives in Data and Scripts, Not Dynamic Workflow Syntax;
+  XVII. Every Deploy Produces a Release Manifest
+- Added sections: none beyond the two principles
 - Removed sections: none
+- Rationale: iteration 2 ("platform maturity" — see specs/002-platform-maturity/) introduces a
+  plugin system and a release manifest as load-bearing architectural guarantees, not optional
+  features, so they are elevated to constitutional principles the same way Principle XI already
+  guarantees a step summary.
 - Templates checked for alignment:
   - .specify/templates/plan-template.md - OK, generic, no update needed
   - .specify/templates/spec-template.md - OK, generic, no update needed
@@ -124,6 +129,26 @@ that a future consumer can opt out of or replace, never as an unconditional defa
 a reusable workflow's logic. `Pricely` is the reference implementation and first consumer, not
 a hardcoded special case.
 
+### XVI. Extensibility Lives in Data and Scripts, Not Dynamic Workflow Syntax
+GitHub Actions' `uses:` key cannot be resolved dynamically (no expressions), so no workflow or
+composite action may attempt to select an action/workflow to run based on a runtime config
+value. Extensibility (plugins, hooks, per-application-type defaults) MUST be implemented as data
+merged and resolved by the Node config loader (`.github/scripts/validate-config.mjs` and its
+plugin modules under `.github/plugins/`) before `deploy-stack.yml` or any composite action ever
+sees it. A reusable workflow or composite action MUST NOT change when a new plugin is added —
+adding one MUST be possible by adding a new file under `.github/plugins/` alone. Rationale: this
+is the only mechanism compatible with GitHub Actions' static `uses:` resolution that still lets
+the platform grow to support new application types without editing the workflows every project
+depends on.
+
+### XVII. Every Deploy Produces a Release Manifest
+Every `deploy-stack.yml` run MUST produce a structured release manifest (image references,
+digests, Compose/env checksums, backup reference, timings, health results, git provenance)
+written to the server (superseding the previous run's manifest, never deleting it) and attached
+as a workflow artifact. The manifest MUST include a literal, ready-to-run rollback command. The
+human-readable step summary (Principle XI) MUST be rendered from this manifest, not derived
+independently, so the two can never drift from each other.
+
 ## Configuration Boundary
 
 Shared infrastructure concerns (deploy host/user/SSH key, GHCR auth mechanism, Tailscale OAuth
@@ -177,4 +202,4 @@ short "Constitution check" note confirming which principles were considered and 
 violated; if one must be knowingly bent for a real constraint, the PR MUST say so explicitly and
 why, rather than silently deviating.
 
-**Version**: 1.0.0 | **Ratified**: 2026-08-01 | **Last Amended**: 2026-08-01
+**Version**: 1.1.0 | **Ratified**: 2026-08-01 | **Last Amended**: 2026-08-02
