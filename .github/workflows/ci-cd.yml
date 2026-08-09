@@ -150,7 +150,7 @@ jobs:
       image_details: ${{ steps.merge.outputs.image_details }}
     steps:
       - name: Download all image artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: image-*
           path: image-artifacts
