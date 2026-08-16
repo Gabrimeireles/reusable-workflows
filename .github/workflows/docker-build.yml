@@ -1,4 +1,4 @@
-﻿name: Reusable - Build and Push Docker Image
+name: Reusable - Build and Push Docker Image
 
 on:
   workflow_call:
@@ -93,7 +93,7 @@ jobs:
         run: bash -c "$COMMAND"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node_version }}
 
@@ -243,7 +243,7 @@ jobs:
 
       - name: Upload matrix collection artifact
         if: inputs.artifact_id != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: image-${{ inputs.artifact_id }}
           path: ${{ steps.artifact_json.outputs.path }}
