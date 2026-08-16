@@ -31,6 +31,12 @@ have application env files (`.env.backend`, etc.), add one secret per file and n
 — you'll reference them positionally in your caller workflow (`ENV_FILE_1`, `ENV_FILE_2`, ...).
 If you use Tailscale, add `TS_OAUTH_CLIENT_ID`/`TS_OAUTH_SECRET`.
 
+If the account-level secrets (`DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `GHCR_PAT`,
+`TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`) are identical to an existing project on the same
+homeserver, add this repo to `scripts/sync-secrets.repos` and run `scripts/sync-secrets.sh`
+instead of retyping them by hand — see
+[`docs/secrets-and-environments.md`](secrets-and-environments.md#reducing-per-repo-duplication-without-an-organization).
+
 ## 4. Write the caller workflow
 
 Copy the example in the main [`README.md`](../README.md#minimal-caller-example) — it calls

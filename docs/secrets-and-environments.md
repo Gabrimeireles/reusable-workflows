@@ -65,6 +65,35 @@ The security ceiling here is "as strong as the weakest caller repository's own s
 acceptable with a single trusted maintainer across every caller repository, and explicitly the
 thing to revisit before adding collaborators.
 
+## Reducing per-repo duplication without an Organization
+
+The copy-per-repo duplication above is real toil once there are more than a couple of projects:
+rotating a leaked `GHCR_PAT` means visiting every caller repository by hand. `scripts/sync-secrets.sh`
+in this repository automates the *typing*, without changing the underlying security model —
+each repo still holds its own independent copy of the secret as a GitHub repository secret; this
+only automates writing that copy.
+
+- Secret **values** live in local files, one per secret name, under
+  `~/.config/reusable-workflows/secrets/` (never committed, outside this repo entirely).
+- The **target repo list** lives in `scripts/sync-secrets.repos` (gitignored — copy it from
+  `scripts/sync-secrets.repos.example`).
+- `scripts/sync-secrets.sh` loops over every (secret name × repo) pair and runs
+  `gh secret set NAME --repo owner/repo < file`. It is intentionally scoped to the small set of
+  account-level secrets that are identical across every project on the same homeserver
+  (`DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `GHCR_PAT`, `TS_OAUTH_CLIENT_ID`,
+  `TS_OAUTH_SECRET`) — it deliberately never touches `COMPOSE_ENV_EXTRA` or `ENV_FILE_*`, which
+  differ per project by design.
+- Rotating a credential becomes: overwrite the one local file, then
+  `scripts/sync-secrets.sh --only THAT_NAME`.
+- `--dry-run` prints the full (name × repo) plan without reading any secret file or calling
+  `gh` at all — safe to run to sanity-check the repo/name list before the real thing.
+
+This is real automation, not a workaround for the constraint above: the script still cannot make
+`reusable-workflows` itself hold a secret callers implicitly receive, because — as the first
+section of this document explains — GitHub Actions never lets a called reusable workflow read
+its own hosting repository's secrets. Every value synced by this script still ends up as an
+independent repository secret in each target repo, indistinguishable from one set by hand.
+
 ## If/when this moves to a GitHub Organization
 
 - Shared infrastructure secrets used by more than one project on the same deploy host (e.g.

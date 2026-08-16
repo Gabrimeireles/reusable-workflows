@@ -1,0 +1,4 @@
+# Real target-repo list for scripts/sync-secrets.sh — not secret, but kept as a local, editable
+# artifact instead of something every project addition requires a commit here for.
+# See scripts/sync-secrets.repos.example.
+/scripts/sync-secrets.repos
